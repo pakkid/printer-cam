@@ -1,4 +1,39 @@
 services:
+  # Front door: routes the viewer and the stream through to go2rtc, and adds
+  # the one sanitised /print endpoint the overlay reads. This is the only
+  # service published on the HTTP port, so your tunnel target is unchanged.
+  web:
+    image: ghcr.io/pakkid/printer-cam-web:latest
+    container_name: printer-cam-web
+    restart: unless-stopped
+    depends_on: [printer-cam]
+
+    environment:
+      # Moonraker lives on the printer; only this container ever talks to it.
+      PRINTER_IP: ${PRINTER_IP:-192.168.1.17}
+      MOONRAKER_PORT: ${MOONRAKER_PORT:-7125}
+
+      # Filament used is reported by Klipper as a length, and this printer's
+      # Moonraker does not parse slicer metadata, so grams are derived from
+      # these. Defaults are 1.75 mm PLA.
+      FILAMENT_DIAMETER: ${FILAMENT_DIAMETER:-1.75}
+      FILAMENT_DENSITY: ${FILAMENT_DENSITY:-1.24}
+
+      # Applied here as well as in go2rtc, so /print is covered too.
+      AUTH_USER: ${AUTH_USER:-}
+      AUTH_PASS: ${AUTH_PASS:-}
+
+    ports:
+      - "${HTTP_PORT:-1984}:80"
+
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || wget -O /dev/null http://127.0.0.1/ 2>&1 | grep -q 401"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   printer-cam:
     # Prebuilt by .github/workflows/publish-image.yml. Deliberately NOT a
     # `build:` -- Portainer cannot build a stack when its environment is
@@ -42,11 +77,9 @@ services:
       - -config={"log":{"level":"${LOG_LEVEL:-info}"}}
 
     ports:
-      # Viewer + WebSocket stream. This is the only port a tunnel needs.
-      - "${HTTP_PORT:-1984}:1984"
-
-      # WebRTC. Only actually used once WEBRTC_CANDIDATE is set, but harmless
-      # to publish either way.
+      # WebRTC media only. The HTTP port is NOT published: the viewer and the
+      # stream are reached through `web` above, which keeps go2rtc's API off
+      # the host and off your tunnel.
       - "8555:8555/tcp"
       - "8555:8555/udp"
 
@@ -63,13 +96,8 @@ services:
       retries: 3
       start_period: 10s
 
-    # Alternative to setting WEBRTC_CANDIDATE: host networking lets go2rtc
-    # discover the host's own LAN address, so WebRTC works with no extra
-    # config. Comment out the `ports:` block above if you use this.
-    #network_mode: host
-
     # Uncomment to put your tunnel container on the same network, so it can
-    # reach this service as http://printer-cam:1984 with no published port.
+    # reach the front door as http://printer-cam-web:80 with no published port.
     #networks: [tunnel]
 
 #networks:

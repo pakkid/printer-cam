@@ -95,6 +95,53 @@
     50%      { border-color: rgba(255, 92, 92, .65); }
   }
 
+  /* --- print progress bar -------------------------------------------- */
+  /* Absent unless a print is running: no bar, no empty placeholder. */
+  #print {
+    left: 0; right: 0;
+    bottom: max(14px, env(safe-area-inset-bottom));
+    padding: 0 14px 0 14px;
+    display: flex; justify-content: center;
+    opacity: 0; transform: translateY(6px);
+    transition: opacity .35s var(--ease), transform .35s var(--ease);
+  }
+  #print.show { opacity: 1; transform: none; }
+  #print[hidden] { display: none; }
+
+  #print-inner {
+    width: min(30rem, 100%);
+    padding: 9px 13px 11px;
+    border-radius: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+  }
+  #print-row {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 12px; color: var(--muted);
+    margin-bottom: 7px;
+  }
+  #print-pct {
+    font-size: 13px; font-weight: 600; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  #print-row .sep { flex: 1; }
+  #print-row b { font-weight: 500; color: var(--fg); font-variant-numeric: tabular-nums; }
+
+  #print-track {
+    height: 4px; border-radius: 999px;
+    background: rgba(255, 255, 255, .14);
+    overflow: hidden;
+  }
+  #print-fill {
+    height: 100%; width: 0%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width .6s var(--ease);
+  }
+  /* A paused print shouldn't look like it is still advancing. */
+  #print-inner.paused #print-fill { background: var(--muted); }
+
   /* --- chrome --------------------------------------------------------- */
   .chrome {
     position: fixed; z-index: 4;
@@ -115,7 +162,10 @@
   #toolbar {
     right: 14px; bottom: max(14px, env(safe-area-inset-bottom));
     display: flex; gap: 8px;
+    transition: bottom .35s var(--ease);
   }
+  /* lift the buttons clear of the progress bar while a print is running */
+  body.printing #toolbar { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 68px); }
   button {
     width: 42px; height: 42px; padding: 0;
     display: grid; place-items: center;
@@ -155,6 +205,20 @@
 </div>
 
 <div class="chrome" id="topbar"><span id="title">Printer Camera</span></div>
+
+<div class="chrome" id="print" hidden>
+  <div id="print-inner">
+    <div id="print-row">
+      <span id="print-pct">0%</span>
+      <span id="print-state"></span>
+      <span class="sep"></span>
+      <span>elapsed <b id="print-elapsed">-</b></span>
+      <span>left <b id="print-left">-</b></span>
+      <span><b id="print-fil">-</b></span>
+    </div>
+    <div id="print-track"><div id="print-fill"></div></div>
+  </div>
+</div>
 
 <div class="chrome" id="toolbar">
   <button id="btn-snap" title="Save a snapshot" aria-label="Save a snapshot">
@@ -461,6 +525,69 @@ function layout() {
 addEventListener('resize', layout);
 addEventListener('orientationchange', layout);
 layout();
+
+// --- print progress --------------------------------------------------
+// Served by the front door at /print, which asks Moonraker and hands back only
+// progress, elapsed, remaining and grams. Moonraker itself is never reachable
+// from the browser: it has no CORS headers, and its API can control the printer.
+const printBar = document.getElementById('print');
+const printInner = document.getElementById('print-inner');
+const el = {
+  pct:     document.getElementById('print-pct'),
+  state:   document.getElementById('print-state'),
+  elapsed: document.getElementById('print-elapsed'),
+  left:    document.getElementById('print-left'),
+  fil:     document.getElementById('print-fil'),
+  fill:    document.getElementById('print-fill'),
+};
+
+/** 4h07m / 12m30s / 45s -- no leading zero units, no false precision. */
+function duration(sec) {
+  if (sec === null || sec === undefined || !isFinite(sec)) return '\u2014';
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return `${h}h${String(m).padStart(2, '0')}m`;
+  if (m) return `${m}m${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+function showPrint(d) {
+  printBar.hidden = false;
+  // hidden -> shown needs a frame in between, or the transition doesn't run
+  requestAnimationFrame(() => printBar.classList.add('show'));
+  document.body.classList.add('printing');
+  printInner.classList.toggle('paused', !!d.paused);
+
+  el.pct.textContent = Math.round(d.progress * 100) + '%';
+  el.fill.style.width = (d.progress * 100).toFixed(1) + '%';
+  el.state.textContent = d.paused ? 'paused' : '';
+  el.elapsed.textContent = duration(d.elapsed_s);
+  el.left.textContent = duration(d.remaining_s);
+  el.fil.textContent = d.filament_g != null ? d.filament_g.toFixed(1) + ' g' : '\u2014';
+}
+
+function hidePrint() {
+  printBar.classList.remove('show');
+  document.body.classList.remove('printing');
+  // wait out the fade before removing it from layout
+  setTimeout(() => { if (!printBar.classList.contains('show')) printBar.hidden = true; }, 400);
+}
+
+async function pollPrint() {
+  try {
+    const r = await fetch('print', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    if (d.printing) showPrint(d); else hidePrint();
+  } catch (e) {
+    // No front door (go2rtc reached directly), or the printer is unreachable.
+    // Either way there is nothing to show, so the bar just stays away.
+    hidePrint();
+  }
+}
+pollPrint();
+setInterval(() => { if (!document.hidden) pollPrint(); }, 3000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollPrint(); });
 
 // --- auto-hide chrome ------------------------------------------------
 let idleTimer;

@@ -9,11 +9,17 @@ points [go2rtc](https://github.com/AlexxIT/go2rtc) at that service and serves
 the H.264 stream to browsers **without ever re-encoding it**.
 
 ```
-                                      ,--WebRTC------> browser   (LAN, real-time)
-K2 (192.168.1.17:8000) --WebRTC--> go2rtc
-      webrtc_local              (re-mux only)
-                                      `--MSE/WebSocket-> browser (via your tunnel)
+K2:8000  --WebRTC-->  go2rtc  --.
+webrtc_local        (re-mux only)|
+                                 >--  web  -->  browser
+K2:7125  --HTTP--->  print     --'  (one port)
+Moonraker            status
 ```
+
+`web` is the only service published: it proxies the viewer and the stream
+straight through to go2rtc, and adds one endpoint, `/print`, carrying four
+numbers for the progress overlay. go2rtc's HTTP port is not published at all
+any more, and Moonraker is never reachable from the browser.
 
 The viewer asks for WebRTC and MSE at the same time and keeps whichever
 connects, so a LAN browser gets real-time video and a browser coming through an
@@ -84,6 +90,47 @@ For low latency *through the tunnel*, forward TCP 8555 as a raw TCP port and
 load the viewer with `?mode=webrtc/tcp`, which pins ICE to TCP candidates.
 Otherwise the MSE fallback over plain HTTP is fine.
 
+## Print progress overlay
+
+While a print is running, a bar appears over the bottom of the video with
+percentage, elapsed time, time remaining and filament used in grams. When
+nothing is printing there is no bar and no placeholder.
+
+It reads one endpoint, `/print`, which returns only:
+
+```json
+{"printing": true, "paused": false, "progress": 0.42,
+ "elapsed_s": 1234, "remaining_s": 1704, "filament_g": 12.9}
+```
+
+...or `{"printing": false}`. Nothing else about the printer leaves the network
+-- not the filename, not the file path, not positions or temperatures.
+
+**Moonraker is deliberately never exposed to the browser.** It has no CORS
+headers, so a page could not read it directly anyway, but the real reason is
+that its API can *control* the printer: cancel a print, run arbitrary gcode,
+trigger an emergency stop. Putting that behind a tunnel would be reckless. Only
+the front-door container talks to it, over a single fixed read-only query, and
+`/print` refuses anything but `GET`.
+
+Two of the four numbers are derived, because this printer's Moonraker reports
+`slicer: Unknown` and leaves `estimated_time`, `filament_total` and
+`filament_weight_total` null -- it does not parse slicer metadata at all:
+
+- **Time remaining** comes from elapsed time and progress, not from a slicer
+  estimate. That makes it an extrapolation: reasonable once a print is
+  underway, meaningless at the very start, so it reads `--` until progress
+  passes 0.5%. It also assumes an even pace, so it will drift on a print whose
+  later layers are much slower.
+- **Filament in grams** comes from the extruded length, which is all Klipper
+  tracks, via `FILAMENT_DIAMETER` and `FILAMENT_DENSITY`. The defaults are
+  1.75 mm PLA (1.24 g/cm3). Printing PETG or ABS without changing the density
+  leaves the figure a few percent out.
+
+The endpoint is cached for two seconds, so a room full of viewers still means
+one request to the printer every two seconds. If the printer is asleep or
+unreachable, it reports "not printing" and the overlay simply stays away.
+
 ## Frame rate
 
 The camera delivers **~14.6-14.9 fps** at 1280x720, measured off the wire
@@ -120,6 +167,9 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 | `AUTH_USER` | *(empty)* | Leave empty to disable HTTP basic auth |
 | `AUTH_PASS` | *(empty)* | |
 | `LOG_LEVEL` | `info` | `debug` or `trace` when troubleshooting |
+| `MOONRAKER_PORT` | `7125` | Moonraker's port on the printer |
+| `FILAMENT_DIAMETER` | `1.75` | Used to derive grams from extruded length |
+| `FILAMENT_DENSITY` | `1.24` | g/cm3. PLA 1.24, PETG 1.27, ABS 1.04 |
 
 Then open `http://<docker-host>:1984/`.
 
