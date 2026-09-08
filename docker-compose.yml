@@ -13,11 +13,14 @@ services:
       PRINTER_IP: ${PRINTER_IP:-192.168.1.17}
       MOONRAKER_PORT: ${MOONRAKER_PORT:-7125}
 
-      # Filament used is reported by Klipper as a length, and this printer's
-      # Moonraker does not parse slicer metadata, so grams are derived from
-      # these. Defaults are 1.75 mm PLA.
+      # The overlay reports filament in metres, straight from the extruded
+      # length Klipper tracks. Grams need a density, and the printer will not
+      # say what is loaded -- the CFS only reports material_type while it is
+      # connected, and filament_rack reports an undocumented Creality code.
+      # So set FILAMENT_DENSITY yourself to add grams (PLA 1.24, PETG 1.27,
+      # ABS 1.04); leave it empty and only metres are shown.
+      FILAMENT_DENSITY: ${FILAMENT_DENSITY:-}
       FILAMENT_DIAMETER: ${FILAMENT_DIAMETER:-1.75}
-      FILAMENT_DENSITY: ${FILAMENT_DENSITY:-1.24}
 
       # Applied here as well as in go2rtc, so /print is covered too.
       AUTH_USER: ${AUTH_USER:-}

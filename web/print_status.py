@@ -17,9 +17,22 @@ Two of those have to be derived, because the K2's Moonraker reports
   remaining_s  from elapsed time and progress, not from the slicer's estimate.
                Unreliable in the first moments of a print, so it is reported as
                null until progress passes 0.5%.
-  filament_g   from the extruded length, which is all Klipper tracks, using the
-               filament diameter and density below. Change them if you print
-               something other than 1.75 mm PLA.
+  filament_m   from the extruded length in mm, which is all Klipper tracks.
+               Just a unit conversion, so it involves no guesswork.
+
+Grams are deliberately NOT reported by default, because working them out needs
+the filament's density and this printer will not tell us what is loaded:
+
+  - The CFS ("box" object) does carry material_type, color_value and remain_len
+    per slot, but only while it is connected -- disconnected, all sixteen slots
+    read "-1".
+  - filament_rack reports a material_type, but as an undocumented Creality code
+    ("001601" for the spool this was written against). There is no published
+    mapping for it and no lookup table in the printer's own config.
+
+Guessing a density would put a wrong number on screen that reads as a measured
+one. So set FILAMENT_DENSITY explicitly if you want grams, and they will be
+added alongside the metres.
 """
 import json
 import math
@@ -34,15 +47,19 @@ MOONRAKER = "http://%s:%s/printer/objects/query?print_stats&display_status&virtu
     os.environ.get("PRINTER_IP", "192.168.1.17"),
     os.environ.get("MOONRAKER_PORT", "7125"),
 )
-DIAMETER = float(os.environ.get("FILAMENT_DIAMETER", "1.75"))   # mm
-DENSITY = float(os.environ.get("FILAMENT_DENSITY", "1.24"))     # g/cm3, PLA
 LISTEN_PORT = int(os.environ.get("STATUS_PORT", "8099"))
 POLL_SECONDS = 2.0        # a shared cache, so 50 viewers still means one poll
 TIMEOUT = 4.0
 
-# Klipper reports extruded filament as a length in mm. grams = volume * density,
-# and 1 cm3 is 1000 mm3.
-GRAMS_PER_MM = math.pi * (DIAMETER / 2) ** 2 * DENSITY / 1000.0
+# Opt-in only: no density is assumed, so no grams unless one is given.
+_density = os.environ.get("FILAMENT_DENSITY", "").strip()
+DENSITY = float(_density) if _density else None            # g/cm3
+DIAMETER = float(os.environ.get("FILAMENT_DIAMETER", "1.75") or 1.75)   # mm
+
+# grams = volume * density, and 1 cm3 is 1000 mm3.
+GRAMS_PER_MM = (
+    math.pi * (DIAMETER / 2) ** 2 * DENSITY / 1000.0 if DENSITY else None
+)
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": {"printing": False}}
@@ -75,14 +92,17 @@ def _shape(status):
 
     used_mm = float(stats.get("filament_used") or 0.0)
 
-    return {
+    payload = {
         "printing": True,
         "paused": state == "paused",
         "progress": round(progress, 4),
         "elapsed_s": round(elapsed),
         "remaining_s": remaining,
-        "filament_g": round(used_mm * GRAMS_PER_MM, 1),
+        "filament_m": round(used_mm / 1000.0, 2),
     }
+    if GRAMS_PER_MM:
+        payload["filament_g"] = round(used_mm * GRAMS_PER_MM, 1)
+    return payload
 
 
 def current():

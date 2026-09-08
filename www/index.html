@@ -563,7 +563,11 @@ function showPrint(d) {
   el.state.textContent = d.paused ? 'paused' : '';
   el.elapsed.textContent = duration(d.elapsed_s);
   el.left.textContent = duration(d.remaining_s);
-  el.fil.textContent = d.filament_g != null ? d.filament_g.toFixed(1) + ' g' : '\u2014';
+  // Metres always; grams only when a density was configured, since the printer
+  // will not say what filament is loaded (see web/print_status.py).
+  el.fil.textContent = d.filament_m != null
+    ? d.filament_m.toFixed(2) + ' m' + (d.filament_g != null ? ` \u00b7 ${d.filament_g.toFixed(0)} g` : '')
+    : '\u2014';
 }
 
 function hidePrint() {

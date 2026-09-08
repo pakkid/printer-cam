@@ -93,14 +93,14 @@ Otherwise the MSE fallback over plain HTTP is fine.
 ## Print progress overlay
 
 While a print is running, a bar appears over the bottom of the video with
-percentage, elapsed time, time remaining and filament used in grams. When
-nothing is printing there is no bar and no placeholder.
+percentage, elapsed time, time remaining and filament used. When nothing is
+printing there is no bar and no placeholder.
 
 It reads one endpoint, `/print`, which returns only:
 
 ```json
 {"printing": true, "paused": false, "progress": 0.42,
- "elapsed_s": 1234, "remaining_s": 1704, "filament_g": 12.9}
+ "elapsed_s": 1234, "remaining_s": 1704, "filament_m": 4.32}
 ```
 
 ...or `{"printing": false}`. Nothing else about the printer leaves the network
@@ -122,10 +122,26 @@ Two of the four numbers are derived, because this printer's Moonraker reports
   underway, meaningless at the very start, so it reads `--` until progress
   passes 0.5%. It also assumes an even pace, so it will drift on a print whose
   later layers are much slower.
-- **Filament in grams** comes from the extruded length, which is all Klipper
-  tracks, via `FILAMENT_DIAMETER` and `FILAMENT_DENSITY`. The defaults are
-  1.75 mm PLA (1.24 g/cm3). Printing PETG or ABS without changing the density
-  leaves the figure a few percent out.
+- **Filament is reported in metres**, straight from the extruded length that
+  Klipper tracks. That is a unit conversion and nothing more, so it is exact.
+
+Grams are available but off by default, and the reason is worth recording,
+because "just read the filament type" looks like it should work and doesn't:
+
+| Source | Reports type? | In practice |
+|---|---|---|
+| `box` (the CFS) | yes -- `material_type`, `color_value`, `remain_len` per slot | only while connected; disconnected, all 16 slots read `-1` |
+| `filament_rack` | yes -- but as an opaque Creality code (`001601`) | no published mapping, and no lookup table in the printer's own config |
+| file metadata | `filament_type` | `null`, same as the rest of the slicer metadata |
+
+Assuming a density anyway would put a fabricated number on screen looking like
+a measured one. So set `FILAMENT_DENSITY` yourself (PLA 1.24, PETG 1.27, ABS
+1.04) and grams appear next to the metres; leave it empty and you get metres
+only.
+
+If you do connect the CFS, `box` starts reporting `remain_len` per slot, which
+would make "filament left on the spool" possible -- a better feature than
+grams, and one this does not currently use.
 
 The endpoint is cached for two seconds, so a room full of viewers still means
 one request to the printer every two seconds. If the printer is asleep or
@@ -168,8 +184,8 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 | `AUTH_PASS` | *(empty)* | |
 | `LOG_LEVEL` | `info` | `debug` or `trace` when troubleshooting |
 | `MOONRAKER_PORT` | `7125` | Moonraker's port on the printer |
-| `FILAMENT_DIAMETER` | `1.75` | Used to derive grams from extruded length |
-| `FILAMENT_DENSITY` | `1.24` | g/cm3. PLA 1.24, PETG 1.27, ABS 1.04 |
+| `FILAMENT_DENSITY` | *(empty)* | Set it to also show grams. PLA 1.24, PETG 1.27, ABS 1.04 |
+| `FILAMENT_DIAMETER` | `1.75` | Only used when a density is set |
 
 Then open `http://<docker-host>:1984/`.
 
