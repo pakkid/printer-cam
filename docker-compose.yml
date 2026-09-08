@@ -1,0 +1,59 @@
+services:
+  printer-cam:
+    build: .
+    image: printer-cam:local
+    container_name: printer-cam
+    restart: unless-stopped
+
+    # Overrides layered on top of the baked-in /config/go2rtc.yaml. go2rtc
+    # accepts repeated -config flags and merges them in order, and a value
+    # starting with "{" is read as inline JSON. The ${...} substitutions are
+    # done by Docker Compose (and by Portainer's stack environment variables)
+    # before the container ever starts.
+    command:
+      - go2rtc
+      - -config=/config/go2rtc.yaml
+      - -config={"streams":{"printer":"webrtc:http://${PRINTER_IP:-192.168.1.17}:8000/call/webrtc_local#format=creality"}}
+      - -config={"api":{"username":"${AUTH_USER:-}","password":"${AUTH_PASS:-}"}}
+      - -config={"log":{"level":"${LOG_LEVEL:-info}"}}
+      # Set WEBRTC_CANDIDATE to <docker-host-lan-ip>:8555 to get real-time
+      # WebRTC playback on the LAN. Without it, go2rtc can only advertise the
+      # container's internal 172.x address, which no browser can reach, and
+      # viewers silently fall back to MSE (~1.5s behind live instead of
+      # real-time). An empty value is harmless.
+      - -config={"webrtc":{"candidates":["${WEBRTC_CANDIDATE:-}"]}}
+
+    ports:
+      # Viewer + WebSocket stream. This is the only port the tunnel needs.
+      - "${HTTP_PORT:-1984}:1984"
+
+      # WebRTC. Only actually used once WEBRTC_CANDIDATE is set, but harmless
+      # to publish either way.
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+
+    # go2rtc is a single static Go binary that only re-muxes H.264 here.
+    # This ceiling is far above what it actually uses (~15 MB).
+    mem_limit: 256m
+
+    healthcheck:
+      # A 401 still proves the HTTP server is alive, and with local_auth: true
+      # even the loopback healthcheck gets one when a password is configured.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:1984/ || wget -O /dev/null http://127.0.0.1:1984/ 2>&1 | grep -q 401"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # Alternative to setting WEBRTC_CANDIDATE: host networking lets go2rtc
+    # discover the host's own LAN address, so WebRTC works with no extra
+    # config. Comment out the `ports:` block above if you use this.
+    #network_mode: host
+
+    # Uncomment to put your tunnel container on the same network, so it can
+    # reach this service as http://printer-cam:1984 with no published port.
+    #networks: [tunnel]
+
+#networks:
+#  tunnel:
+#    external: true

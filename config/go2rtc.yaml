@@ -1,0 +1,60 @@
+# Base go2rtc configuration for the Creality K2 / K2 Plus built-in camera.
+#
+# Values that you are likely to change (printer IP, auth, log level) are NOT
+# templated here. They are layered on top of this file by docker-compose.yml,
+# which passes a second `-config` argument containing inline JSON built from
+# your environment variables. That keeps this file static and avoids go2rtc's
+# own ${VAR} substitution, which registers substituted values as "secrets"
+# and mangles its log output.
+
+log:
+  level: info
+
+streams:
+  # The K2's firmware still runs its `webrtc_local` signalling service on
+  # port 8000 even though Creality removed the viewer page that used it.
+  #
+  # `#format=creality` tells go2rtc to work around the firmware quirk where
+  # the printer sends RTP with a payload type it never declares in its SDP
+  # answer, which is why generic WebRTC clients connect but never render a
+  # frame. Requires go2rtc >= 1.9.10.
+  #
+  # The stream is H.264 and is only ever re-muxed, never re-encoded, so CPU
+  # usage stays at ~0%. docker-compose.yml overrides the IP below.
+  printer: webrtc:http://192.168.1.17:8000/call/webrtc_local#format=creality
+
+api:
+  listen: ":1984"
+
+  # Serve our own viewer instead of go2rtc's bundled web UI. As a side effect
+  # the bundled config/stream editor pages are not present at all.
+  static_dir: /app/www
+
+  # local_auth: true means basic auth is enforced for 127.0.0.1 as well.
+  # This matters: go2rtc's default is to exempt loopback, and a tunnel client
+  # running on the same host and pointed at http://127.0.0.1:1984 would then
+  # silently bypass the password for the whole internet. Browsers reaching you
+  # through the tunnel still authenticate normally, because the tunnel
+  # forwards their Authorization header.
+  #
+  # When no username is set, no auth middleware is installed at all and this
+  # setting does nothing. Credentials are supplied by docker-compose.yml.
+  local_auth: true
+
+  # HARD security boundary: only these HTTP paths get registered. Everything
+  # else returns 404 whether or not a request is authenticated.
+  #
+  # Deliberately absent: /api/streams (lets a caller define new streams by
+  # URL), /api/config, /api/restart, /api/exit, /api/log. Those are what make
+  # an internet-exposed go2rtc dangerous. This printer only needs watching.
+  allow_paths:
+    - /                 # the viewer in /app/www
+    - /api/ws           # MSE + fMP4 (and WebRTC signalling) over WebSocket
+    - /api/stream.mp4   # plain fMP4 over HTTP - VLC, ffmpeg, <video src>
+    - /api/frame.jpeg   # JPEG snapshot (see README: this one does cost CPU)
+
+# go2rtc listens for WebRTC on :8555 (tcp+udp) by default, which is what the
+# viewer prefers on the LAN because it is genuinely real-time. It needs both
+# that port reachable and a candidate address the browser can actually route
+# to -- see WEBRTC_CANDIDATE in docker-compose.yml. Viewers that cannot reach
+# it (anyone coming through an HTTP tunnel) fall back to MSE automatically.

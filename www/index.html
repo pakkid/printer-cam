@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<title>Printer Camera</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128247;</text></svg>">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --muted: #9aa3ad;
+    --panel: rgba(22, 26, 32, .82);
+    --line: rgba(255, 255, 255, .14);
+    --accent: #6aa9ff;
+    --err: #ff5c5c;
+    --ease: cubic-bezier(.22, .61, .36, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%; margin: 0;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+
+  /* --- video ---------------------------------------------------------- */
+  #stage {
+    position: fixed; inset: 0; background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* #frame is sized in JS to the largest box of the stream's true aspect
+     that fits the viewport; the video then fills it exactly. See the aspect
+     note in the script for why object-fit: contain cannot be trusted here. */
+  #frame { position: relative; }
+  printer-cam { display: block; width: 100%; height: 100%; }
+  printer-cam video {
+    display: block; width: 100%; height: 100%;
+    object-fit: fill; background: #000;
+    /* dim the picture behind the overlay, and ease back up when live */
+    filter: brightness(1);
+    transition: filter .45s var(--ease);
+  }
+  body.busy printer-cam video { filter: brightness(.32) saturate(.7); }
+
+  /* --- status overlay ------------------------------------------------- */
+  #scrim {
+    position: fixed; inset: 0; z-index: 3;
+    display: grid; place-items: center;
+    background: rgba(6, 8, 11, .5);
+    opacity: 0; visibility: hidden;
+    transition: opacity .35s var(--ease), visibility .35s;
+  }
+  #scrim.show { opacity: 1; visibility: visible; }
+
+  #card {
+    display: flex; align-items: center; gap: 16px;
+    padding: 18px 22px;
+    border-radius: 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+    backdrop-filter: blur(14px);
+    transform: translateY(10px) scale(.97);
+    opacity: 0;
+    transition: transform .4s var(--ease), opacity .4s var(--ease);
+  }
+  #scrim.show #card { transform: none; opacity: 1; }
+
+  #spinner {
+    width: 26px; height: 26px; flex: none;
+    border-radius: 50%;
+    border: 2.5px solid rgba(255, 255, 255, .16);
+    border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #msg { margin: 0; font-weight: 600; letter-spacing: .1px; }
+  #detail { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+  #detail code {
+    color: var(--fg); background: rgba(255, 255, 255, .08);
+    padding: 1px 5px; border-radius: 5px;
+  }
+
+  /* error variant: stop spinning, pulse the card edge */
+  #card.error { animation: edge 1.6s var(--ease) infinite; }
+  #card.error #spinner {
+    animation: none;
+    border-color: rgba(255, 92, 92, .25); border-top-color: var(--err);
+  }
+  @keyframes edge {
+    0%, 100% { border-color: var(--line); }
+    50%      { border-color: rgba(255, 92, 92, .65); }
+  }
+
+  /* --- chrome --------------------------------------------------------- */
+  .chrome {
+    position: fixed; z-index: 4;
+    opacity: 1;
+    transition: opacity .3s var(--ease);
+    pointer-events: none;
+  }
+  .chrome > * { pointer-events: auto; }
+  body.idle .chrome { opacity: 0; }
+
+  #topbar {
+    top: 0; left: 0; right: 0;
+    padding: max(12px, env(safe-area-inset-top)) 14px 26px;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, .6), transparent);
+  }
+  #title { font-weight: 600; letter-spacing: .2px; }
+
+  #toolbar {
+    right: 14px; bottom: max(14px, env(safe-area-inset-bottom));
+    display: flex; gap: 8px;
+  }
+  button {
+    width: 42px; height: 42px; padding: 0;
+    display: grid; place-items: center;
+    border-radius: 12px; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+    backdrop-filter: blur(10px);
+    transition: background .18s var(--ease), transform .12s var(--ease),
+                border-color .18s var(--ease);
+  }
+  button:hover { background: rgba(44, 50, 60, .9); border-color: rgba(255,255,255,.22); }
+  button:active { transform: scale(.93); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button svg {
+    width: 19px; height: 19px; fill: none; stroke: currentColor;
+    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  }
+  /* spin the reconnect glyph while a reconnect is pending */
+  body.busy #btn-reload svg { animation: spin 1.4s linear infinite; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body class="busy">
+
+<div id="stage"><div id="frame"><printer-cam id="cam"></printer-cam></div></div>
+
+<div id="scrim" class="show">
+  <div id="card">
+    <div id="spinner"></div>
+    <div>
+      <p id="msg">Connecting to the printer…</p>
+      <p id="detail">stream <code id="d-src"></code> · <code id="d-mode"></code></p>
+    </div>
+  </div>
+</div>
+
+<div class="chrome" id="topbar"><span id="title">Printer Camera</span></div>
+
+<div class="chrome" id="toolbar">
+  <button id="btn-snap" title="Save a snapshot" aria-label="Save a snapshot">
+    <svg viewBox="0 0 24 24"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.7l1.2-2h7.2l1.2 2h1.7A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg>
+  </button>
+  <button id="btn-full" title="Fullscreen" aria-label="Fullscreen">
+    <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
+  <button id="btn-reload" title="Reconnect" aria-label="Reconnect">
+    <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+  </button>
+</div>
+
+<script type="module">
+import { VideoRTC } from './video-rtc.js';
+
+const params = new URLSearchParams(location.search);
+const src = params.get('src') || 'printer';
+
+// Transport order. The player attempts WebRTC and MSE *in parallel* and
+// prefers WebRTC once it delivers a frame, so this list costs nothing to a
+// viewer that can only do one of them:
+//
+//   - WebRTC wins on the LAN. Genuinely real-time (no buffer) and it reports
+//     the stream's true 1280x720, because it never goes through the fMP4
+//     muxer that loses the SPS. Needs UDP/TCP 8555 reachable.
+//   - MSE is the fallback that survives a plain HTTP(S) tunnel, being just a
+//     WebSocket. See the onmse() override for the timestamp mess it has to
+//     compensate for.
+//   - mp4 is a last resort for browsers without MediaSource (older iOS
+//     Safari). Note it is not really video: video-rtc.js implements it by
+//     decoding into a canvas and setting the poster, i.e. a still-frame
+//     slideshow.
+//
+// `mjpeg` is intentionally absent: it would re-encode every frame instead of
+// passing H.264 through, which is the one thing here that costs real CPU.
+const mode = params.get('mode') || 'webrtc,mse,mp4';
+
+// True aspect ratio of the printer's stream (1280x720 on the K2 Plus).
+//
+// We cannot let the browser work this out. The printer's WebRTC signalling
+// carries no sprop-parameter-sets, so go2rtc has no SPS when it builds the
+// fMP4 init segment and falls back to a dummy 128x96 one. The real frames are
+// 1280x720, but a browser on MSE takes its intrinsic size from that dummy
+// track header and reports 1280x960, stretching the picture to 4:3. WebRTC
+// reports the real size, and forcing a 16:9 box is a no-op for it, so the same
+// correction is safe on both transports.
+// Override with ?aspect=4/3 (or any w/h) if your camera differs.
+const aspect = (() => {
+  const raw = params.get('aspect') || '16/9';
+  const [w, h] = raw.split('/').map(Number);
+  return w > 0 && h > 0 ? w / h : 16 / 9;
+})();
+
+// Seconds of MSE buffer to retain, in *real* seconds. The printer's keyframe
+// interval is ~1.04s, so a few seconds is plenty to always hold one.
+const bufferSeconds = Math.max(2, Number(params.get('buffer')) || 6);
+
+document.getElementById('d-src').textContent  = src;
+document.getElementById('d-mode').textContent = mode;
+
+const scrim = document.getElementById('scrim');
+const card  = document.getElementById('card');
+const msgEl = document.getElementById('msg');
+
+/** @param {'live'|'connecting'|'error'} state */
+function setState(state, transport) {
+  const busy = state !== 'live';
+  document.body.classList.toggle('busy', busy);
+  scrim.classList.toggle('show', busy);
+  card.classList.toggle('error', state === 'error');
+  if (state === 'error')           msgEl.textContent = 'Stream error — retrying…';
+  else if (state === 'connecting') msgEl.textContent = 'Connecting to the printer…';
+  if (transport) console.info('[printer-cam] transport:', transport);
+}
+
+class PrinterCam extends VideoRTC {
+  oninit() {
+    super.oninit();
+    this.video.controls = false;   // we draw our own chrome
+    this.video.muted = true;       // video-only stream, but keeps autoplay happy
+
+    // See the onmse() override below for why playbackRate is left alone here.
+  }
+
+  /**
+   * Replaces video-rtc.js's MSE handling. Same plumbing, different timing
+   * policy, because this camera's timestamps are wrong and upstream's
+   * assumptions break on them.
+   *
+   * The printer stamps its RTP timestamps as though it were encoding at about
+   * 1.5 fps while actually sending ~14.6. go2rtc copies those timestamps
+   * faithfully into the fMP4 it muxes, so the container claims 1.5 fps and the
+   * media clock runs ~9.7x faster than wall time. A browser renders MSE frames
+   * according to those timestamps, so it plays at ~1.5 fps -- the stream looks
+   * like a slideshow.
+   *
+   * WebRTC is immune: it renders frames as they arrive and only uses
+   * timestamps for jitter buffering, which is why the same feed is smooth
+   * there. This only affects MSE (and anything else reading the muxed mp4).
+   *
+   * Upstream's controller cannot cope: it keeps a 5-media-second window, which
+   * here is only ~0.5 real seconds, and drives `playbackRate = gap` toward 1.0
+   * -- i.e. toward 1.5 fps. Its forward seeks into a window that thin then
+   * stall the decoder outright.
+   *
+   * So: measure how fast media time actually advances relative to the wall
+   * clock, and play at that rate. Frames then come out at ~14.6 fps. The
+   * measurement is adaptive rather than a hardcoded 9.7, so this keeps working
+   * if the printer or go2rtc is ever fixed (the ratio simply converges to 1).
+   * There is no audio track, so a high playback rate has no pitch side effect.
+   */
+  onmse() {
+    const TARGET = 0.6;   // real seconds behind live to aim for
+
+    /** media seconds per wall second; 0 until measured */
+    let ratio = 0;
+    let sampleWall = 0, sampleEnd = 0;
+
+    /** @type {MediaSource} */
+    const Managed = 'ManagedMediaSource' in window;
+    const MS = Managed ? window.ManagedMediaSource : window.MediaSource;
+    const ms = new MS();
+
+    ms.addEventListener('sourceopen', () => {
+      if (!Managed) URL.revokeObjectURL(this.video.src);
+      this.send({ type: 'mse', value: this.codecs(MS.isTypeSupported) });
+    }, { once: true });
+
+    if (Managed) {
+      this.video.disableRemotePlayback = true;
+      this.video.srcObject = ms;
+    } else {
+      this.video.src = URL.createObjectURL(ms);
+      this.video.srcObject = null;
+    }
+
+    this.play();
+    this.mseCodecs = '';
+
+    this.onmessage['mse'] = msg => {
+      if (msg.type !== 'mse') return;
+      this.mseCodecs = msg.value;
+
+      const sb = ms.addSourceBuffer(msg.value);
+      sb.mode = 'segments';
+
+      sb.addEventListener('updateend', () => {
+        if (!sb.updating && bufLen > 0) {
+          try {
+            sb.appendBuffer(buf.slice(0, bufLen));
+            bufLen = 0;
+          } catch (e) { /* throws once the media source starts closing */ }
+        }
+        if (sb.updating || !sb.buffered || !sb.buffered.length) return;
+
+        const v = this.video;
+        const end = sb.buffered.end(sb.buffered.length - 1);
+        const now = performance.now() / 1000;
+
+        // --- how fast is media time really advancing? ---
+        if (!sampleWall) {
+          sampleWall = now; sampleEnd = end;
+        } else if (now - sampleWall >= 0.4) {
+          const inst = (end - sampleEnd) / (now - sampleWall);
+          // Ignore nonsense (a stalled feed, or a discontinuity in the source)
+          if (inst > 0.2 && inst < 40) ratio = ratio ? ratio * 0.7 + inst * 0.3 : inst;
+          sampleWall = now; sampleEnd = end;
+        }
+        if (!ratio) return;   // nothing sensible to do until we have a measurement
+
+        // --- trim, in real-time terms ---
+        const keep = end - bufferSeconds * ratio;
+        const start0 = sb.buffered.start(0);
+        // Only ever trim behind the playhead, so the keyframe the decoder is
+        // working from is never removed underneath it.
+        if (keep > start0 && keep < v.currentTime - ratio) {
+          try {
+            sb.remove(start0, keep);
+            ms.setLiveSeekableRange(keep, end);
+          } catch (e) { /* ignore; we retry on the next append */ }
+        }
+
+        // Only intervene if playback is stranded outside the buffer entirely.
+        if (v.currentTime < sb.buffered.start(0)) v.currentTime = sb.buffered.start(0);
+
+        // --- play at the rate media is actually arriving, plus a nudge to
+        // settle on TARGET seconds of latency ---
+        const realGap = (end - v.currentTime) / ratio;
+        const trim = Math.max(-0.15, Math.min(0.25, (realGap - TARGET) * 0.15));
+        const rate = Math.max(0.5, Math.min(20, ratio * (1 + trim)));
+        if (Math.abs(v.playbackRate - rate) > 0.02) v.playbackRate = rate;
+      });
+
+      const buf = new Uint8Array(4 * 1024 * 1024);
+      let bufLen = 0;
+
+      this.ondata = data => {
+        if (sb.updating || bufLen > 0) {
+          const b = new Uint8Array(data);
+          if (bufLen + b.byteLength > buf.length) return;   // drop rather than overflow
+          buf.set(b, bufLen);
+          bufLen += b.byteLength;
+        } else {
+          try {
+            sb.appendBuffer(data);
+          } catch (e) { /* as above */ }
+        }
+      };
+    };
+  }
+
+  onconnect() {
+    const started = super.onconnect();
+    if (started && this.pcState === WebSocket.CLOSED) setState('connecting');
+    return started;
+  }
+
+  onopen() {
+    const result = super.onopen();
+    this.onmessage['ui'] = msg => {
+      if (msg.type === 'error') setState('error');
+      else if (['mse', 'mp4', 'hls', 'mjpeg'].includes(msg.type)) setState('live', msg.type.toUpperCase());
+    };
+    return result;
+  }
+
+  onpcvideo(ev) {
+    super.onpcvideo(ev);
+    if (this.pcState !== WebSocket.CLOSED) setState('live', 'WebRTC');
+  }
+
+  onclose() {
+    // When WebRTC wins the race the player deliberately closes the WebSocket
+    // (it sets pcState = OPEN first, then drops the socket). That is a
+    // successful handover, not a disconnect, so don't report it as one.
+    if (this.pcState === WebSocket.CLOSED) setState('connecting');
+    return super.onclose();
+  }
+}
+customElements.define('printer-cam', PrinterCam);
+
+const cam = document.getElementById('cam');
+cam.mode = mode;
+cam.media = 'video';                 // the K2 camera has no audio track
+cam.background = false;              // hidden tab => disconnect => 0% CPU on the host
+cam.src = new URL('api/ws?src=' + encodeURIComponent(src), location.href);
+
+// --- controls --------------------------------------------------------
+document.getElementById('btn-full').onclick = () =>
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+
+document.getElementById('btn-reload').onclick = () => {
+  setState('connecting');
+  cam.ondisconnect();
+  setTimeout(() => cam.onconnect(), 200);
+};
+
+// Snapshot is taken from the already-decoded frame in the browser, so it
+// costs the server nothing (unlike go2rtc's /api/frame.jpeg, which does a
+// full decode + JPEG encode per call).
+document.getElementById('btn-snap').onclick = () => {
+  const v = cam.video;
+  if (!v || !v.videoWidth) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = v.videoWidth;
+  canvas.height = Math.round(v.videoWidth / aspect);
+  // Same reason as `aspect` above: scale the decoded frame back to the real
+  // geometry rather than the stretched intrinsic size.
+  canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${src}-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }, 'image/jpeg', 0.92);
+};
+
+// --- keep the video box at the stream's true aspect ratio ------------
+const frame = document.getElementById('frame');
+function layout() {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let w = vw, h = vw / aspect;
+  if (h > vh) { h = vh; w = vh * aspect; }
+  frame.style.width = Math.round(w) + 'px';
+  frame.style.height = Math.round(h) + 'px';
+}
+addEventListener('resize', layout);
+addEventListener('orientationchange', layout);
+layout();
+
+// --- auto-hide chrome ------------------------------------------------
+let idleTimer;
+const wake = () => {
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add('idle'), 3000);
+};
+['mousemove', 'touchstart', 'keydown'].forEach(e => addEventListener(e, wake, { passive: true }));
+wake();
+</script>
+</body>
+</html>
