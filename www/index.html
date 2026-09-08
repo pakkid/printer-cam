@@ -126,6 +126,15 @@
     font-variant-numeric: tabular-nums;
   }
   #print-row .sep { flex: 1; }
+  /* The real filament colour, straight off the printer. Ringed so that white
+     and black both read against the panel. */
+  #print-swatch {
+    width: 9px; height: 9px; border-radius: 50%;
+    flex: none; display: none;
+    border: 1px solid rgba(255, 255, 255, .45);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
+  }
+  #print-swatch.show { display: inline-block; }
   #print-row b { font-weight: 500; color: var(--fg); font-variant-numeric: tabular-nums; }
 
   #print-track {
@@ -210,6 +219,8 @@
   <div id="print-inner">
     <div id="print-row">
       <span id="print-pct">0%</span>
+      <span id="print-swatch"></span>
+      <span id="print-fil-type"></span>
       <span id="print-state"></span>
       <span class="sep"></span>
       <span>elapsed <b id="print-elapsed">-</b></span>
@@ -538,6 +549,8 @@ const el = {
   elapsed: document.getElementById('print-elapsed'),
   left:    document.getElementById('print-left'),
   fil:     document.getElementById('print-fil'),
+  swatch:  document.getElementById('print-swatch'),
+  filType: document.getElementById('print-fil-type'),
   fill:    document.getElementById('print-fill'),
 };
 
@@ -563,11 +576,23 @@ function showPrint(d) {
   el.state.textContent = d.paused ? 'paused' : '';
   el.elapsed.textContent = duration(d.elapsed_s);
   el.left.textContent = duration(d.remaining_s);
-  // Metres always; grams only when a density was configured, since the printer
-  // will not say what filament is loaded (see web/print_status.py).
+  // Metres are exact. Grams appear when the density is known -- which it
+  // usually is, because the printer reports the filament type over Creality's
+  // websocket (see web/print_status.py).
   el.fil.textContent = d.filament_m != null
     ? d.filament_m.toFixed(2) + ' m' + (d.filament_g != null ? ` \u00b7 ${d.filament_g.toFixed(0)} g` : '')
     : '\u2014';
+
+  // Filament type and its actual colour, when the printer knows them.
+  el.filType.textContent = d.filament_type || '';
+  el.filType.title = d.filament_name || '';
+  if (d.filament_color) {
+    el.swatch.style.background = d.filament_color;
+    el.swatch.classList.add('show');
+    el.swatch.title = [d.filament_name, d.filament_color].filter(Boolean).join(' ');
+  } else {
+    el.swatch.classList.remove('show');
+  }
 }
 
 function hidePrint() {

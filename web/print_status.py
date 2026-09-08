@@ -20,23 +20,32 @@ Two of those have to be derived, because the K2's Moonraker reports
   filament_m   from the extruded length in mm, which is all Klipper tracks.
                Just a unit conversion, so it involves no guesswork.
 
-Grams are deliberately NOT reported by default, because working them out needs
-the filament's density and this printer will not tell us what is loaded:
+Grams need the filament's density, and the density needs to know what is
+loaded. Moonraker will not say: its filament_rack reports only an undocumented
+Creality code ("001601"), and the CFS "box" object reports material_type only
+while the CFS is connected.
 
-  - The CFS ("box" object) does carry material_type, color_value and remain_len
-    per slot, but only while it is connected -- disconnected, all sixteen slots
-    read "-1".
-  - filament_rack reports a material_type, but as an undocumented Creality code
-    ("001601" for the spool this was written against). There is no published
-    mapping for it and no lookup table in the printer's own config.
+Creality's own proprietary WebSocket on port 9999 does say, which is how
+Creality Print and OrcaSlicer know. Asking it {"method":"get",
+"params":{"boxsInfo":1}} returns the loaded spool already decoded:
 
-Guessing a density would put a wrong number on screen that reads as a measured
-one. So set FILAMENT_DENSITY explicitly if you want grams, and they will be
-added alongside the metres.
+    box id=0 (the spool holder; 1-4 are CFS boxes)
+      vendor='Creality' type='PLA' name='Soleyin Ultra PLA' color='#0ffffff'
+
+So the type is read from there and mapped to a density, which makes grams
+correct without anyone configuring anything. FILAMENT_DENSITY still overrides
+it, and if port 9999 says nothing usable then grams are simply omitted rather
+than guessed.
+
+Protocol reverse-engineered by DaviBe92/k2-websocket-re. It is not documented
+by Creality and may change with firmware, hence all the defensive handling.
 """
+import base64
 import json
 import math
 import os
+import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -47,22 +56,163 @@ MOONRAKER = "http://%s:%s/printer/objects/query?print_stats&display_status&virtu
     os.environ.get("PRINTER_IP", "192.168.1.17"),
     os.environ.get("MOONRAKER_PORT", "7125"),
 )
+PRINTER_HOST = os.environ.get("PRINTER_IP", "192.168.1.17")
+CREALITY_WS_PORT = int(os.environ.get("CREALITY_WS_PORT", "9999"))
 LISTEN_PORT = int(os.environ.get("STATUS_PORT", "8099"))
 POLL_SECONDS = 2.0        # a shared cache, so 50 viewers still means one poll
+SPOOL_SECONDS = 30.0      # the loaded spool changes far less often
 TIMEOUT = 4.0
 
-# Opt-in only: no density is assumed, so no grams unless one is given.
+# Overrides whatever the printer reports, for anyone printing something the
+# table below does not cover.
 _density = os.environ.get("FILAMENT_DENSITY", "").strip()
-DENSITY = float(_density) if _density else None            # g/cm3
+DENSITY_OVERRIDE = float(_density) if _density else None   # g/cm3
 DIAMETER = float(os.environ.get("FILAMENT_DIAMETER", "1.75") or 1.75)   # mm
 
-# grams = volume * density, and 1 cm3 is 1000 mm3.
-GRAMS_PER_MM = (
-    math.pi * (DIAMETER / 2) ** 2 * DENSITY / 1000.0 if DENSITY else None
-)
+# Typical densities in g/cm3. Filled types are heavier, hence the separate
+# entries; anything not listed falls through to no grams rather than a guess.
+DENSITIES = {
+    "PLA": 1.24, "PLA+": 1.24, "PLA-CF": 1.30, "SILK": 1.24, "PLA-SILK": 1.24,
+    "PETG": 1.27, "PET": 1.27, "PETG-CF": 1.30,
+    "ABS": 1.04, "ABS-CF": 1.11, "ASA": 1.07,
+    "TPU": 1.21, "TPE": 1.20,
+    "PA": 1.14, "NYLON": 1.14, "PA-CF": 1.19,
+    "PC": 1.20, "HIPS": 1.04, "PVA": 1.23, "PVB": 1.09,
+}
+
+
+def grams_per_mm(density):
+    """grams = volume * density, and 1 cm3 is 1000 mm3."""
+    return math.pi * (DIAMETER / 2) ** 2 * density / 1000.0
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": {"printing": False}}
+_spool_lock = threading.Lock()
+_spool = {"at": 0.0, "info": None}
+
+
+# --- Creality's proprietary WebSocket (port 9999) -------------------------
+# Only used to ask what filament is loaded. One request, {"method":"get"}, and
+# the connection is closed again. A hand-rolled client because this needs no
+# dependencies and only ever sends that single frame.
+
+def _ws_send_text(sock, text):
+    payload = text.encode()
+    mask = os.urandom(4)
+    header = bytearray([0x81])
+    n = len(payload)
+    if n < 126:
+        header.append(0x80 | n)
+    elif n < 65536:
+        header.append(0x80 | 126)
+        header += struct.pack(">H", n)
+    else:
+        header.append(0x80 | 127)
+        header += struct.pack(">Q", n)
+    sock.sendall(bytes(header) + mask
+                 + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def _ws_boxs_info():
+    """Returns the printer's materialBoxs list, or None."""
+    sock = socket.create_connection((PRINTER_HOST, CREALITY_WS_PORT), timeout=TIMEOUT)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((
+            f"GET / HTTP/1.1\r\nHost: {PRINTER_HOST}:{CREALITY_WS_PORT}\r\n"
+            f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        if b"101" not in head.split(b"\r\n")[0]:
+            return None
+
+        _ws_send_text(sock, json.dumps({"method": "get", "params": {"boxsInfo": 1}}))
+        sock.settimeout(TIMEOUT)
+
+        def need(n):
+            nonlocal buf
+            while len(buf) < n:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise EOFError
+                buf += chunk
+            out, buf = buf[:n], buf[n:]
+            return out
+
+        # The printer pushes unrelated state frames too, so read past them.
+        for _ in range(30):
+            head2 = need(2)
+            opcode = head2[0] & 0x0F
+            length = head2[1] & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", need(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", need(8))[0]
+            body = need(length)
+            if opcode == 8:
+                return None
+            if opcode != 1:
+                continue
+            try:
+                msg = json.loads(body.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and "boxsInfo" in msg:
+                return (msg["boxsInfo"] or {}).get("materialBoxs") or []
+        return None
+    finally:
+        sock.close()
+
+
+def _pick_material(boxes):
+    """The loaded spool: whichever slot is selected, else the only one there."""
+    slots = [
+        (box, mat)
+        for box in boxes or []
+        for mat in (box.get("materials") or [])
+        if mat.get("state") not in (0, None) and (mat.get("type") or "").strip()
+    ]
+    if not slots:
+        return None
+    for box, mat in slots:
+        if mat.get("selected") == 1:
+            return mat
+    return slots[0][1] if len(slots) == 1 else None
+
+
+def spool():
+    """Cached filament info from port 9999, or None if it says nothing useful."""
+    now = time.monotonic()
+    with _spool_lock:
+        if now - _spool["at"] < SPOOL_SECONDS:
+            return _spool["info"]
+    try:
+        mat = _pick_material(_ws_boxs_info())
+    except (OSError, ValueError, KeyError, EOFError, TimeoutError):
+        mat = None
+    info = None
+    if mat:
+        # Colours come back with a stray leading zero, e.g. "#0ffffff".
+        colour = (mat.get("color") or "").strip()
+        if colour.startswith("#0") and len(colour) == 8:
+            colour = "#" + colour[2:]
+        info = {
+            "type": (mat.get("type") or "").strip().upper() or None,
+            "name": (mat.get("name") or "").strip() or None,
+            "color": colour if len(colour) == 7 else None,
+        }
+    with _spool_lock:
+        _spool["at"] = time.monotonic()
+        _spool["info"] = info
+    return info
 
 
 def _fetch():
@@ -100,8 +250,18 @@ def _shape(status):
         "remaining_s": remaining,
         "filament_m": round(used_mm / 1000.0, 2),
     }
-    if GRAMS_PER_MM:
-        payload["filament_g"] = round(used_mm * GRAMS_PER_MM, 1)
+
+    info = spool()
+    if info:
+        payload["filament_type"] = info["type"]
+        payload["filament_name"] = info["name"]
+        payload["filament_color"] = info["color"]
+
+    density = DENSITY_OVERRIDE
+    if density is None and info and info["type"]:
+        density = DENSITIES.get(info["type"])
+    if density:
+        payload["filament_g"] = round(used_mm * grams_per_mm(density), 1)
     return payload
 
 

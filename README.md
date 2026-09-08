@@ -93,14 +93,16 @@ Otherwise the MSE fallback over plain HTTP is fine.
 ## Print progress overlay
 
 While a print is running, a bar appears over the bottom of the video with
-percentage, elapsed time, time remaining and filament used. When nothing is
-printing there is no bar and no placeholder.
+percentage, filament type and colour, elapsed time, time remaining and
+filament used. When nothing is printing there is no bar and no placeholder.
 
 It reads one endpoint, `/print`, which returns only:
 
 ```json
-{"printing": true, "paused": false, "progress": 0.42,
- "elapsed_s": 1234, "remaining_s": 1704, "filament_m": 4.32}
+{"printing": true, "paused": false, "progress": 0.386,
+ "elapsed_s": 1621, "remaining_s": 2579, "filament_m": 5.03,
+ "filament_type": "PLA", "filament_name": "Soleyin Ultra PLA",
+ "filament_color": "#ffffff", "filament_g": 15.0}
 ```
 
 ...or `{"printing": false}`. Nothing else about the printer leaves the network
@@ -124,24 +126,55 @@ Two of the four numbers are derived, because this printer's Moonraker reports
   later layers are much slower.
 - **Filament is reported in metres**, straight from the extruded length that
   Klipper tracks. That is a unit conversion and nothing more, so it is exact.
+- **Grams are derived** from the filament type, which the printer does report --
+  see below. No configuration needed, and no guessing either: if the type is
+  unknown or unrecognised, grams are omitted rather than invented.
 
-Grams are available but off by default, and the reason is worth recording,
-because "just read the filament type" looks like it should work and doesn't:
+The overlay also shows the filament type and a swatch of its actual colour.
 
-| Source | Reports type? | In practice |
+### Where the filament type comes from
+
+Moonraker will not tell you, which is a dead end worth documenting:
+
+| Moonraker source | Reports type? | In practice |
 |---|---|---|
-| `box` (the CFS) | yes -- `material_type`, `color_value`, `remain_len` per slot | only while connected; disconnected, all 16 slots read `-1` |
-| `filament_rack` | yes -- but as an opaque Creality code (`001601`) | no published mapping, and no lookup table in the printer's own config |
-| file metadata | `filament_type` | `null`, same as the rest of the slicer metadata |
+| `box` (the CFS) | yes -- `material_type`, `color_value`, `remain_len` per slot | only while the CFS is connected; disconnected, all 16 slots read `-1` |
+| `filament_rack` | yes -- but as an opaque code (`001601`) | no published mapping, no lookup table in the printer's own config |
+| file metadata | `filament_type` | `null`, like the rest of the slicer metadata |
 
-Assuming a density anyway would put a fabricated number on screen looking like
-a measured one. So set `FILAMENT_DENSITY` yourself (PLA 1.24, PETG 1.27, ABS
-1.04) and grams appear next to the metres; leave it empty and you get metres
-only.
+**Creality's own WebSocket on port 9999 does tell you**, already decoded, which
+is how Creality Print and OrcaSlicer know. One read request:
 
-If you do connect the CFS, `box` starts reporting `remain_len` per slot, which
-would make "filament left on the spool" possible -- a better feature than
-grams, and one this does not currently use.
+```json
+{"method": "get", "params": {"boxsInfo": 1}}
+```
+
+comes back with, for the spool holder (box `id: 0`; `1`-`4` are CFS boxes):
+
+```json
+{"vendor": "Creality", "type": "PLA", "name": "Soleyin Ultra PLA",
+ "color": "#0ffffff", "percent": 100, "rfid": "01601", "state": 1}
+```
+
+Note `rfid: "01601"` against Moonraker's `material_type: "001601"` -- the
+Moonraker field is that same material id, and this WebSocket is what resolves
+it to a name. `state: 1` means the details were entered by hand rather than
+read off an RFID tag, and colours arrive with a stray leading zero
+(`#0ffffff`), which is stripped.
+
+The type is looked up in a small density table (PLA 1.24, PETG 1.27, ABS 1.04,
+TPU 1.21, and so on) to produce grams. `FILAMENT_DENSITY` still overrides it for
+anything the table doesn't cover. If port 9999 is unreachable or reports
+nothing usable, the overlay simply shows metres.
+
+The protocol is not documented by Creality and may change with firmware, so
+every part of this degrades to "no filament info" rather than failing. Credit
+to [DaviBe92/k2-websocket-re](https://github.com/DaviBe92/k2-websocket-re) for
+reverse-engineering it.
+
+If you connect the CFS, the same call starts reporting `percent` per slot from
+RFID spools -- filament left on the spool, a better figure than grams used, and
+not something this reads today.
 
 The endpoint is cached for two seconds, so a room full of viewers still means
 one request to the printer every two seconds. If the printer is asleep or
@@ -184,8 +217,9 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 | `AUTH_PASS` | *(empty)* | |
 | `LOG_LEVEL` | `info` | `debug` or `trace` when troubleshooting |
 | `MOONRAKER_PORT` | `7125` | Moonraker's port on the printer |
-| `FILAMENT_DENSITY` | *(empty)* | Set it to also show grams. PLA 1.24, PETG 1.27, ABS 1.04 |
-| `FILAMENT_DIAMETER` | `1.75` | Only used when a density is set |
+| `FILAMENT_DENSITY` | *(empty)* | Overrides the density looked up from the reported filament type |
+| `FILAMENT_DIAMETER` | `1.75` | Used when converting length to grams |
+| `CREALITY_WS_PORT` | `9999` | Creality's WebSocket, read for the filament type |
 
 Then open `http://<docker-host>:1984/`.
 
