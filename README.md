@@ -144,10 +144,11 @@ entirely.
 The image is built for `linux/amd64` and `linux/arm64` by
 `.github/workflows/publish-image.yml` on every push to `master`.
 
-**If the pull fails with `denied` or `unauthorized`,** the GHCR package is still
-private. Open it at `github.com/users/pakkid/packages/container/printer-cam/settings`
-and set the visibility to public, or add a registry credential in Portainer
-under **Registries**.
+The package is public -- verified with an anonymous pull -- so Portainer needs
+no registry credentials. If a pull ever does fail with `denied` or
+`unauthorized`, check the package's visibility at
+`github.com/users/pakkid/packages/container/printer-cam/settings`, or add a
+credential in Portainer under **Registries**.
 
 To build locally instead:
 
