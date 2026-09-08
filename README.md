@@ -269,10 +269,11 @@ The same quirk has a small cost for `PRINTER_IP`: at `LOG_LEVEL=debug` the two
 dropped. Everything else logs normally, and at `info` nothing is affected. For
 `AUTH_PASS` the redaction is the point -- the password never reaches the log.
 
-**`www/video-rtc.js` is vendored** from go2rtc v1.9.14 (MIT). It is the
-upstream player component -- WebSocket signalling, MSE buffering, reconnect --
-and `www/index.html` subclasses it for the UI. Refresh it from upstream if you
-bump the base image.
+**`www/video-rtc.js` is vendored** from go2rtc v1.9.14 and is MIT licensed;
+its licence is included as `www/LICENSE-go2rtc`. It is the upstream player
+component -- WebSocket signalling, reconnect, WebRTC negotiation -- and
+`www/index.html` subclasses it, overriding `onmse()` as described above.
+Refresh it from upstream if you bump the base image.
 
 ## Requirements
 
