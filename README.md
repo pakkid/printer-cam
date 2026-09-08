@@ -21,6 +21,9 @@ straight through to go2rtc, and adds one endpoint, `/print`, carrying four
 numbers for the progress overlay. go2rtc's HTTP port is not published at all
 any more, and Moonraker is never reachable from the browser.
 
+It publishes two ports: the viewer on `HTTP_PORT` (point your tunnel here) and
+the on/off switch on `ADMIN_PORT` (do not).
+
 The viewer asks for WebRTC and MSE at the same time and keeps whichever
 connects, so a LAN browser gets real-time video and a browser coming through an
 HTTP tunnel transparently falls back to a ~0.6s feed.
@@ -89,6 +92,48 @@ MSE -- which is now a perfectly good fallback rather than a broken one.
 For low latency *through the tunnel*, forward TCP 8555 as a raw TCP port and
 load the viewer with `?mode=webrtc/tcp`, which pins ICE to TCP candidates.
 Otherwise the MSE fallback over plain HTTP is fine.
+
+## The on/off switch
+
+For printing something you would rather not have on the internet: a page with a
+single switch that refuses the viewer, the stream and the print data outright.
+
+```
+http://<docker-host>:1985/
+```
+
+Three things make it worth trusting:
+
+**It is on a port of its own, and your tunnel does not forward it.** That, not
+an IP allowlist, is the separation. An allowlist alone would not work: a tunnel
+running as a container on the same Docker network has a private source address
+too, indistinguishable from a machine on your LAN. `ADMIN_ALLOW` (private
+ranges by default) and an optional `ADMIN_PASS` sit on top as defence in depth.
+
+**The position survives a restart.** It is written to a file on the
+`camera-switch` volume and restored before nginx starts, so a reboot or a
+`docker compose up -d` does not quietly put the camera back on the air. A fresh
+volume starts live.
+
+**Anyone already watching gets dropped, not grandfathered.** nginx normally
+keeps old workers alive through a reload until their connections close -- and a
+video stream never closes, so a viewer mid-stream would have carried on
+indefinitely. `worker_shutdown_timeout 3s` in `web/main.conf` terminates them
+instead; measured, an in-flight stream is cut about three seconds after the
+switch moves.
+
+While it is off, every path on the viewer port returns 503 with a plain "the
+camera is switched off" page -- the viewer, the assets, `/api/ws`,
+`/api/stream.mp4` and `/print` alike. The switch's own port stays up, or you
+could never turn it back on. And because go2rtc only dials the printer while
+somebody is watching, switching off also stops the camera being read at all.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ADMIN_PORT` | `1985` | The switch. Do not tunnel this |
+| `ADMIN_BIND` | `0.0.0.0` | Set to one interface to narrow it further |
+| `ADMIN_ALLOW` | private ranges | Space-separated CIDRs |
+| `ADMIN_USER` / `ADMIN_PASS` | `admin` / *(empty)* | Optional password on the switch |
 
 ## Print progress overlay
 
@@ -220,6 +265,9 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 | `FILAMENT_DENSITY` | *(empty)* | Overrides the density looked up from the reported filament type |
 | `FILAMENT_DIAMETER` | `1.75` | Used when converting length to grams |
 | `CREALITY_WS_PORT` | `9999` | Creality's WebSocket, read for the filament type |
+| `ADMIN_PORT` | `1985` | The on/off switch. Do not tunnel this port |
+| `ADMIN_ALLOW` | private ranges | Who may reach the switch |
+| `ADMIN_PASS` | *(empty)* | Optional password on the switch |
 
 Then open `http://<docker-host>:1984/`.
 
@@ -307,6 +355,7 @@ too.
 ## Using it
 
 - Viewer: `http://host:1984/`
+- On/off switch: `http://host:1985/` (LAN only -- never tunnel it)
 - Snapshot / VLC / ffmpeg: `http://host:1984/api/stream.mp4?src=printer`
 - JPEG still: `http://host:1984/api/frame.jpeg?src=printer`
 
@@ -417,6 +466,11 @@ docker logs printer-cam
   certainly not forwarding WebSocket upgrades. As a quick check, open
   `?mode=mp4`, which uses a plain HTTP response instead.
 - **401 loops** -- `local_auth: true` means loopback needs credentials too.
+- **Everything returns 503 and the off page** -- the switch is off. Open
+  `http://host:1985/`. It also comes back off after a restart, by design.
+- **The switch page is unreachable** -- check `ADMIN_ALLOW` covers the address
+  nginx actually sees, which depends on how Docker publishes the port. The
+  startup log prints the allowlist it built.
 - **Nothing at all after a firmware update** -- Creality may have moved or
   removed `/call/webrtc_local`. Verify with
   `curl -i http://<printer-ip>:8000/call/webrtc_local`.

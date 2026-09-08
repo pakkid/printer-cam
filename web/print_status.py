@@ -46,6 +46,7 @@ import math
 import os
 import socket
 import struct
+import subprocess
 import threading
 import time
 import urllib.error
@@ -84,6 +85,51 @@ DENSITIES = {
 def grams_per_mm(density):
     """grams = volume * density, and 1 cm3 is 1000 mm3."""
     return math.pi * (DIAMETER / 2) ** 2 * density / 1000.0
+
+# --- the on/off switch ---------------------------------------------------
+# Persisted to a file so the position survives a container restart, and read
+# back at startup. nginx does the actual refusing: this only rewrites the
+# snippet nginx includes, then reloads it. Keeping the decision in nginx means
+# a disabled camera costs nothing per request, and cannot be bypassed by
+# reaching this service directly.
+
+STATE_DIR = os.environ.get("STATE_DIR", "/data")
+STATE_FILE = os.path.join(STATE_DIR, "enabled")
+GATE_FILE = os.environ.get("GATE_FILE", "/etc/nginx/gate.conf")
+
+_switch_lock = threading.Lock()
+
+
+def read_switch():
+    """True unless the file says otherwise, so a fresh volume starts live."""
+    try:
+        with open(STATE_FILE) as fh:
+            return fh.read().strip() != "0"
+    except OSError:
+        return True
+
+
+def write_gate(enabled):
+    """Rewrite the snippet nginx includes in every gated location."""
+    tmp = GATE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write("" if enabled else "return 503;\n")
+    os.replace(tmp, GATE_FILE)      # atomic: nginx never reads a half-written file
+
+
+def set_switch(enabled):
+    with _switch_lock:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write("1" if enabled else "0")
+        os.replace(tmp, STATE_FILE)
+        write_gate(enabled)
+        # worker_shutdown_timeout in main.conf makes this drop viewers who are
+        # already watching, instead of letting their stream run on.
+        subprocess.run(["nginx", "-s", "reload"], check=False, timeout=15)
+    return read_switch()
+
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": {"printing": False}}
@@ -287,17 +333,42 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "printer-cam-status"
 
-    def do_GET(self):
-        if self.path.split("?")[0] != "/print":
-            self.send_error(404)
-            return
-        body = json.dumps(current()).encode()
-        self.send_response(200)
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/print":
+            self._json(current())
+        elif path == "/state":
+            self._json({"enabled": read_switch()})
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        # Only reachable through the admin server on its own port; see
+        # web/admin.conf for why that separation is the access control.
+        if self.path.split("?")[0] != "/state":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 4096:
+                raise ValueError("body too large")
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            enabled = payload["enabled"]
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+        except (ValueError, KeyError, TypeError):
+            self._json({"error": "expected an {enabled: true|false} body"}, 400)
+            return
+        self._json({"enabled": set_switch(enabled)})
 
     def log_message(self, *args):
         pass    # nginx already logs the request

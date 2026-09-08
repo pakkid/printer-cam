@@ -26,12 +26,35 @@ services:
       AUTH_USER: ${AUTH_USER:-}
       AUTH_PASS: ${AUTH_PASS:-}
 
+      # Who may reach the on/off switch. Defence in depth only -- the real
+      # separation is that the switch listens on ADMIN_PORT, which your tunnel
+      # does not forward. Narrow it to your own subnet if you like, but note
+      # that whether nginx sees the true client address depends on how Docker
+      # publishes the port on your host.
+      ADMIN_ALLOW: ${ADMIN_ALLOW:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1}
+
+      # Optional password on the switch, on top of the port separation.
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASS: ${ADMIN_PASS:-}
+
     ports:
+      # The viewer. This is the one your tunnel points at.
       - "${HTTP_PORT:-1984}:80"
+
+      # The on/off switch, deliberately a different port so the tunnel has no
+      # route to it. Bind it to a single interface if you want to go further,
+      # e.g. ADMIN_BIND=192.168.1.50 to expose it on one NIC only.
+      - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_PORT:-1985}:81"
+
+    # Keeps the switch position across a restart or a recreate.
+    volumes:
+      - camera-switch:/data
 
     mem_limit: 128m
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || wget -O /dev/null http://127.0.0.1/ 2>&1 | grep -q 401"]
+      # The switch's own port, because the viewer legitimately returns 503 when
+      # the camera is switched off and that must not read as unhealthy.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:81/ || wget -O /dev/null http://127.0.0.1:81/ 2>&1 | grep -qE '401|403'"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -102,6 +125,9 @@ services:
     # Uncomment to put your tunnel container on the same network, so it can
     # reach the front door as http://printer-cam-web:80 with no published port.
     #networks: [tunnel]
+
+volumes:
+  camera-switch:
 
 #networks:
 #  tunnel:

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>Camera Switch</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,400;6..96,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #000; --ink: #f2efe9;
+    --dim: rgba(242,239,233,.56); --rule: rgba(242,239,233,.38);
+    --live: #f2efe9; --off: #c8402f;
+    --serif: "Bodoni Moda", "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--ground); color: var(--ink); }
+  body {
+    display: grid; place-items: center; padding: 20px;
+    font-family: var(--mono); font-size: 13px;
+  }
+  main { width: min(26rem, 100%); border: 1px solid var(--ink); }
+
+  header { padding: 14px 18px 13px; border-bottom: 1px solid var(--rule); }
+  h1 {
+    margin: 0; font-family: var(--serif); font-weight: 400;
+    font-size: 12px; text-transform: uppercase; letter-spacing: .26em;
+  }
+
+  #state { padding: 22px 18px; text-align: center; border-bottom: 1px solid var(--rule); }
+  #word {
+    font-family: var(--serif); font-size: 34px; font-weight: 600; line-height: 1;
+  }
+  #word.off { color: var(--off); }
+  #sub { margin-top: 9px; font-size: 10px; letter-spacing: .16em;
+         text-transform: uppercase; color: var(--dim); }
+
+  /* A switch built from right angles: the knob is a filled square that slides
+     between two cells. No radii anywhere. */
+  #switch {
+    display: block; width: 100%; padding: 0;
+    background: var(--ground); border: 0; border-bottom: 1px solid var(--rule);
+    cursor: pointer; color: inherit; font: inherit;
+  }
+  #track {
+    display: grid; grid-template-columns: 1fr 1fr;
+    height: 54px; position: relative;
+  }
+  #track span {
+    display: grid; place-items: center;
+    font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--dim); z-index: 1;
+    transition: color .18s linear;
+  }
+  #knob {
+    position: absolute; top: 0; bottom: 0; left: 0; width: 50%;
+    background: var(--ink);
+    transition: transform .18s linear, background .18s linear;
+  }
+  body[data-enabled="false"] #knob { transform: translateX(100%); background: var(--off); }
+  body[data-enabled="true"]  #track span:nth-of-type(1) { color: var(--ground); }
+  body[data-enabled="false"] #track span:nth-of-type(2) { color: var(--ground); }
+  #switch:disabled { cursor: wait; opacity: .5; }
+  #switch:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+
+  footer { padding: 13px 18px; font-size: 10.5px; line-height: 1.6; color: var(--dim); }
+  footer b { color: var(--ink); font-weight: 500; }
+  #err { color: var(--off); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body data-enabled="true">
+<main>
+  <header><h1>Printer Camera</h1></header>
+
+  <div id="state">
+    <div id="word">&mdash;</div>
+    <div id="sub">Reading switch position</div>
+  </div>
+
+  <button id="switch" type="button" aria-label="Toggle the camera">
+    <span id="track"><span>Live</span><span>Off</span><i id="knob"></i></span>
+  </button>
+
+  <footer id="foot">
+    This page is served on a port of its own and is never routed through the
+    tunnel. The position is kept on disk, so it <b>survives a restart</b>.
+    <span id="err"></span>
+  </footer>
+</main>
+
+<script type="module">
+const body = document.body;
+const word = document.getElementById('word');
+const sub = document.getElementById('sub');
+const btn = document.getElementById('switch');
+const err = document.getElementById('err');
+
+function render(enabled) {
+  body.dataset.enabled = String(enabled);
+  word.textContent = enabled ? 'Live' : 'Off';
+  word.classList.toggle('off', !enabled);
+  sub.textContent = enabled
+    ? 'Viewer and stream are reachable'
+    : 'Viewer, stream and print data all refused';
+}
+
+async function load() {
+  try {
+    const r = await fetch('state', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    render((await r.json()).enabled);
+    err.textContent = '';
+  } catch (e) {
+    err.textContent = ' Could not read the switch.';
+  }
+}
+
+btn.onclick = async () => {
+  btn.disabled = true;
+  const next = body.dataset.enabled !== 'true';
+  try {
+    const r = await fetch('state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    if (!r.ok) throw new Error(r.status);
+    render((await r.json()).enabled);
+    err.textContent = '';
+  } catch (e) {
+    err.textContent = ' Could not move the switch.';
+    await load();
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+load();
+setInterval(() => { if (!document.hidden) load(); }, 10000);
+</script>
+</body>
+</html>

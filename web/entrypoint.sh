@@ -2,11 +2,9 @@
 set -e
 
 UPSTREAM_HOST="${UPSTREAM_HOST:-printer-cam}"
+STATE_DIR="${STATE_DIR:-/data}"
 
-# Basic auth, if configured, is applied here as well as by go2rtc, so that
-# /print is covered too -- it never reaches go2rtc. nginx accepts a SHA-1
-# digest in its password file, which the stdlib can produce without pulling in
-# apache2-utils.
+# --- viewer password (also covers /print, which never reaches go2rtc) -------
 if [ -n "${AUTH_USER:-}" ]; then
   python3 - "$AUTH_USER" "${AUTH_PASS:-}" <<'PY' > /etc/nginx/htpasswd
 import base64, hashlib, sys
@@ -14,12 +12,52 @@ user, password = sys.argv[1], sys.argv[2]
 digest = base64.b64encode(hashlib.sha1(password.encode()).digest()).decode()
 print(f"{user}:{{SHA}}{digest}")
 PY
-  chmod 600 /etc/nginx/htpasswd
+  # nginx's workers run as `nginx`, not root, and read the password file per
+  # request -- root-only permissions here produce a 500, not a 401.
+  chown nginx /etc/nginx/htpasswd && chmod 400 /etc/nginx/htpasswd
   printf 'auth_basic "printer-cam";\nauth_basic_user_file /etc/nginx/htpasswd;\n' > /etc/nginx/auth.conf
-  echo "printer-cam-web: basic auth enabled for user ${AUTH_USER}"
+  echo "printer-cam-web: viewer basic auth enabled for user ${AUTH_USER}"
 else
   : > /etc/nginx/auth.conf
-  echo "printer-cam-web: no basic auth (AUTH_USER unset)"
+  echo "printer-cam-web: no viewer basic auth (AUTH_USER unset)"
+fi
+
+# --- the switch's own port -------------------------------------------------
+# Defence in depth only. The real separation is that this listens on a port
+# your tunnel does not forward. Private ranges by default rather than a
+# specific subnet, because whether nginx sees the true client address depends
+# on how Docker publishes the port on your host.
+ADMIN_ALLOW="${ADMIN_ALLOW:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1}"
+: > /etc/nginx/admin-allow.conf
+for cidr in $ADMIN_ALLOW; do
+  echo "allow $cidr;" >> /etc/nginx/admin-allow.conf
+done
+echo "deny all;" >> /etc/nginx/admin-allow.conf
+echo "printer-cam-web: switch reachable from ${ADMIN_ALLOW}"
+
+if [ -n "${ADMIN_PASS:-}" ]; then
+  python3 - "${ADMIN_USER:-admin}" "$ADMIN_PASS" <<'PY' > /etc/nginx/admin-htpasswd
+import base64, hashlib, sys
+user, password = sys.argv[1], sys.argv[2]
+digest = base64.b64encode(hashlib.sha1(password.encode()).digest()).decode()
+print(f"{user}:{{SHA}}{digest}")
+PY
+  chown nginx /etc/nginx/admin-htpasswd && chmod 400 /etc/nginx/admin-htpasswd
+  printf 'auth_basic "camera switch";\nauth_basic_user_file /etc/nginx/admin-htpasswd;\n' \
+    > /etc/nginx/admin-auth.conf
+  echo "printer-cam-web: switch also password protected"
+else
+  : > /etc/nginx/admin-auth.conf
+fi
+
+# --- restore the switch position before nginx starts -----------------------
+mkdir -p "$STATE_DIR"
+if [ -f "$STATE_DIR/enabled" ] && [ "$(cat "$STATE_DIR/enabled")" = "0" ]; then
+  printf 'return 503;\n' > /etc/nginx/gate.conf
+  echo "printer-cam-web: camera is SWITCHED OFF (restored from $STATE_DIR/enabled)"
+else
+  : > /etc/nginx/gate.conf
+  echo "printer-cam-web: camera is live"
 fi
 
 resolve() {
@@ -57,8 +95,9 @@ echo "printer-cam-web: ${UPSTREAM_HOST} -> ${ADDR}"
   done
 ) &
 
-# Keep the status endpoint alive on its own. If it stops, /print returns 502 and
-# the overlay hides itself; the video is unaffected either way.
+# Keep the status endpoint alive on its own. If it stops, /print returns 502
+# and the overlay hides itself; the video is unaffected either way. The switch
+# lives here too, so a crash must not leave it unusable.
 (
   while :; do
     python3 /opt/print_status.py || echo "printer-cam-web: status service exited, restarting"
