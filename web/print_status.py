@@ -96,6 +96,10 @@ def grams_per_mm(density):
 STATE_DIR = os.environ.get("STATE_DIR", "/data")
 STATE_FILE = os.path.join(STATE_DIR, "enabled")
 GATE_FILE = os.environ.get("GATE_FILE", "/etc/nginx/gate.conf")
+UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "printer-cam")
+UPSTREAM_PORT = os.environ.get("UPSTREAM_PORT", "1984")
+AUTH_USER = os.environ.get("AUTH_USER", "")
+AUTH_PASS = os.environ.get("AUTH_PASS", "")
 
 _switch_lock = threading.Lock()
 
@@ -117,6 +121,37 @@ def write_gate(enabled):
     os.replace(tmp, GATE_FILE)      # atomic: nginx never reads a half-written file
 
 
+def sever_streams():
+    """Cut every established stream, WebRTC included.
+
+    Turning the gate on stops new requests, but an existing WebRTC session
+    does not go through the front door at all: its media flows browser <->
+    go2rtc:8555 directly, and the signalling WebSocket has already been closed
+    by the player after handover, so there is nothing here left to drop.
+
+    go2rtc's /api/restart re-execs the process, which tears down every peer
+    connection at once. That endpoint is reachable only from inside this
+    network -- go2rtc's port is not published, and the front door denies the
+    path on its public listener.
+    """
+    url = "http://%s:%s/api/restart" % (UPSTREAM_HOST, UPSTREAM_PORT)
+    req = urllib.request.Request(url, data=b"", method="POST")
+    if AUTH_USER:
+        token = base64.b64encode(
+            ("%s:%s" % (AUTH_USER, AUTH_PASS)).encode()
+        ).decode()
+        req.add_header("Authorization", "Basic " + token)
+    try:
+        urllib.request.urlopen(req, timeout=TIMEOUT).close()
+        return True
+    except urllib.error.HTTPError as e:
+        # go2rtc answers the restart by exec'ing, so a truncated reply here is
+        # success, not failure.
+        return e.code < 500
+    except (OSError, TimeoutError):
+        return False
+
+
 def set_switch(enabled):
     with _switch_lock:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -126,8 +161,14 @@ def set_switch(enabled):
         os.replace(tmp, STATE_FILE)
         write_gate(enabled)
         # worker_shutdown_timeout in main.conf makes this drop viewers who are
-        # already watching, instead of letting their stream run on.
+        # already watching over the front door, instead of letting their
+        # stream run on.
         subprocess.run(["nginx", "-s", "reload"], check=False, timeout=15)
+        if not enabled:
+            # ...and this deals with WebRTC, which bypasses the front door.
+            if not sever_streams():
+                print("printer-cam-web: could not restart go2rtc; an already "
+                      "established WebRTC session may survive", flush=True)
     return read_switch()
 
 

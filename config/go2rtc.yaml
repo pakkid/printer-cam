@@ -54,13 +54,26 @@ api:
   # else returns 404 whether or not a request is authenticated.
   #
   # Deliberately absent: /api/streams (lets a caller define new streams by
-  # URL), /api/config, /api/restart, /api/exit, /api/log. Those are what make
-  # an internet-exposed go2rtc dangerous. This printer only needs watching.
+  # URL), /api/config, /api/exit, /api/log. Those are what make an
+  # internet-exposed go2rtc dangerous. This printer only needs watching.
   allow_paths:
     - /                 # the viewer in /app/www
     - /api/ws           # MSE + fMP4 (and WebRTC signalling) over WebSocket
     - /api/stream.mp4   # plain fMP4 over HTTP - VLC, ffmpeg, <video src>
     - /api/frame.jpeg   # JPEG snapshot (see README: this one does cost CPU)
+    - /api/restart      # see below -- this one is NOT publicly reachable
+
+  # /api/restart is here for one reason: it is the only way to sever an
+  # established WebRTC session. WebRTC media flows browser <-> go2rtc:8555
+  # directly and never passes through the front door, and the signalling
+  # WebSocket is already closed by then, so nothing upstream has a connection
+  # left to drop. When the camera switch is turned off, the front door POSTs
+  # here and go2rtc re-execs itself, which drops every peer connection at once.
+  #
+  # It is not exposed: go2rtc's HTTP port is not published to the host, and the
+  # front door explicitly denies /api/restart on the public listener (see
+  # web/nginx.conf), so the only caller that can reach it is the front door
+  # container itself.
 
 webrtc:
   # go2rtc listens on :8555 (tcp+udp) by default, which is what the viewer

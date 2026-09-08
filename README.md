@@ -115,12 +115,33 @@ ranges by default) and an optional `ADMIN_PASS` sit on top as defence in depth.
 `docker compose up -d` does not quietly put the camera back on the air. A fresh
 volume starts live.
 
-**Anyone already watching gets dropped, not grandfathered.** nginx normally
-keeps old workers alive through a reload until their connections close -- and a
-video stream never closes, so a viewer mid-stream would have carried on
-indefinitely. `worker_shutdown_timeout 3s` in `web/main.conf` terminates them
-instead; measured, an in-flight stream is cut about three seconds after the
-switch moves.
+**Anyone already watching gets dropped, not grandfathered.** This took two
+mechanisms, because the two transports leave by different doors:
+
+- *Through the front door* (MSE, `stream.mp4`, the viewer itself): nginx
+  normally keeps old workers alive through a reload until their connections
+  close, and a video stream never closes, so a viewer mid-stream would have
+  carried on indefinitely. `worker_shutdown_timeout 3s` in `web/main.conf`
+  terminates them instead. Measured: an in-flight stream is cut about three
+  seconds after the switch moves.
+- *Not through the front door at all* (WebRTC): once a peer connection is up,
+  media flows browser <-> `go2rtc:8555` directly, and the player has already
+  closed the signalling WebSocket, so nothing upstream has a connection left to
+  drop. Gating HTTP alone left an established WebRTC session streaming
+  happily -- verified at 14.8 fps with the switch off. So the switch also POSTs
+  to go2rtc's `/api/restart`, which re-execs the process and tears down every
+  peer connection at once. Verified after the fix: 0 fps, playhead frozen,
+  `pcState` closed.
+
+`/api/restart` is in go2rtc's `allow_paths` for that one purpose, and the front
+door denies the path on its public listener (`location = /api/restart { deny
+all; }`) -- without that, `location /` would proxy it straight through to the
+internet. go2rtc's own port is not published either, so the only thing that can
+reach it is the front-door container. Do not "tidy up" either half.
+
+As a side effect of the port separation, the viewer page cannot drive the
+switch even in the browser: it is a different origin with no CORS headers, so a
+`fetch` from the viewer fails outright.
 
 While it is off, every path on the viewer port returns 503 with a plain "the
 camera is switched off" page -- the viewer, the assets, `/api/ws`,
