@@ -1,0 +1,52 @@
+name: Publish image
+
+# Portainer cannot build this stack itself when its environment is connected
+# through the Portainer Agent: the agent does not proxy BuildKit's gRPC session,
+# so `compose build` dies with "failed to list workers ... http2: frame too
+# large". Building here instead means Portainer only ever has to pull an image,
+# which also lets the stack be deployed from Portainer's plain web editor.
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "README.md"
+      - ".env.example"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 covers the NAS and single-board hosts people run Portainer on.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

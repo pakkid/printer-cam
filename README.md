@@ -123,21 +123,37 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 
 Then open `http://<docker-host>:1984/`.
 
-A repository stack is the path of least resistance because this compose file
-uses `build: .`, so the deploy needs `Dockerfile`, `www/` and `config/` next to
-it. Portainer clones the repo onto the host, so that resolves. The repo can be
-private -- Portainer takes credentials for it.
+The compose file pulls a prebuilt image from `ghcr.io`, so **Web editor** works
+just as well as **Repository** -- paste `docker-compose.yml` in and set the
+environment variables. Nothing is built at deploy time.
 
-Portainer's **Web editor** and **Upload** options accept a compose file on its
-own with no build context, so `build:` has nothing to work from there. If you
-want to avoid git entirely, either:
+That is deliberate. Portainer cannot build a stack when its environment is
+connected through the **Portainer Agent**: the agent does not proxy BuildKit's
+gRPC session, so the build fails with
 
-- copy this directory to the Docker host and run `docker compose up -d` over
-  SSH (Portainer will then show it as an external stack, with limited editing);
-  or
-- build and push the image to a registry once, then replace `build: .` with
-  `image: ghcr.io/<you>/printer-cam:1` and paste the compose into the web
-  editor -- no build context needed.
+```
+listing workers for Build: failed to list workers: Unavailable:
+error reading server preface: http2: frame too large
+```
+
+which is a Portainer/agent limitation rather than anything wrong with the
+stack. See [portainer#12530](https://github.com/orgs/portainer/discussions/12530).
+Publishing the image from CI removes the build step from the deploy path
+entirely.
+
+The image is built for `linux/amd64` and `linux/arm64` by
+`.github/workflows/publish-image.yml` on every push to `master`.
+
+**If the pull fails with `denied` or `unauthorized`,** the GHCR package is still
+private. Open it at `github.com/users/pakkid/packages/container/printer-cam/settings`
+and set the visibility to public, or add a registry credential in Portainer
+under **Registries**.
+
+To build locally instead:
+
+```bash
+docker build -t printer-cam:local . && sed -i 's|image: ghcr.io/pakkid/printer-cam:latest|image: printer-cam:local|' docker-compose.yml
+```
 
 ### Pointing your tunnel at it
 

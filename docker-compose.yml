@@ -1,7 +1,16 @@
 services:
   printer-cam:
-    build: .
-    image: printer-cam:local
+    # Prebuilt by .github/workflows/publish-image.yml. Deliberately NOT a
+    # `build:` -- Portainer cannot build a stack when its environment is
+    # connected through the Portainer Agent (the agent does not proxy
+    # BuildKit's gRPC session, so the build fails with "failed to list
+    # workers ... http2: frame too large"). Pulling an image sidesteps that
+    # entirely, and means this file also works in Portainer's web editor.
+    #
+    # To build it yourself instead:
+    #   docker build -t printer-cam:local .
+    # then change the line below to `image: printer-cam:local`.
+    image: ghcr.io/pakkid/printer-cam:latest
     container_name: printer-cam
     restart: unless-stopped
 
