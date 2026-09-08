@@ -3,159 +3,104 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b0d10">
+<meta name="theme-color" content="#000000">
 <title>Printer Camera</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128247;</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='4' width='12' height='9' fill='none' stroke='%23fff' stroke-width='1.5'/></svg>">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,400;6..96,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
+  /* A single committed look: paper-white ink on absolute black, hairline
+     rules, right angles only. No radii, no blur, no shadows, no gradients --
+     the panels are opaque so they read over any frame. One serif for the
+     wordmark, one monospace for everything measured. */
   :root {
-    --bg: #0b0d10;
-    --fg: #e8eaed;
-    --muted: #9aa3ad;
-    --panel: rgba(22, 26, 32, .82);
-    --line: rgba(255, 255, 255, .14);
-    --accent: #6aa9ff;
-    --err: #ff5c5c;
-    --ease: cubic-bezier(.22, .61, .36, 1);
+    --ground: #000;
+    --ink:    #f2efe9;          /* warm paper white, not clinical #fff */
+    --dim:    rgba(242, 239, 233, .56);
+    --rule:   rgba(242, 239, 233, .38);
+    --alarm:  #c8402f;          /* the only colour, and only for faults */
+
+    --serif: "Bodoni Moda", "Times New Roman", Times, serif;
+    --mono:  "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
   }
+
   * { box-sizing: border-box; }
   html, body {
     height: 100%; margin: 0;
-    background: var(--bg); color: var(--fg);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.4;
     overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
   }
 
-  /* --- video ---------------------------------------------------------- */
+  /* ---------- video ---------- */
   #stage {
-    position: fixed; inset: 0; background: #000;
+    position: fixed; inset: 0; background: var(--ground);
     display: flex; align-items: center; justify-content: center;
   }
-  /* #frame is sized in JS to the largest box of the stream's true aspect
-     that fits the viewport; the video then fills it exactly. See the aspect
-     note in the script for why object-fit: contain cannot be trusted here. */
+  /* #frame is sized in JS to the largest box of the stream's true aspect that
+     fits the viewport; the video then fills it exactly. See the aspect note in
+     the script for why object-fit: contain cannot be trusted here. */
   #frame { position: relative; }
   printer-cam { display: block; width: 100%; height: 100%; }
   printer-cam video {
     display: block; width: 100%; height: 100%;
-    object-fit: fill; background: #000;
-    /* dim the picture behind the overlay, and ease back up when live */
+    object-fit: fill; background: var(--ground);
     filter: brightness(1);
-    transition: filter .45s var(--ease);
+    transition: filter .3s linear;
   }
-  body.busy printer-cam video { filter: brightness(.32) saturate(.7); }
+  body.busy printer-cam video { filter: brightness(.28) grayscale(.4); }
 
-  /* --- status overlay ------------------------------------------------- */
+  /* ---------- status card ---------- */
   #scrim {
     position: fixed; inset: 0; z-index: 3;
     display: grid; place-items: center;
-    background: rgba(6, 8, 11, .5);
+    background: rgba(0, 0, 0, .58);
     opacity: 0; visibility: hidden;
-    transition: opacity .35s var(--ease), visibility .35s;
+    transition: opacity .25s linear, visibility .25s;
   }
   #scrim.show { opacity: 1; visibility: visible; }
 
   #card {
-    display: flex; align-items: center; gap: 16px;
-    padding: 18px 22px;
-    border-radius: 16px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
-    backdrop-filter: blur(14px);
-    transform: translateY(10px) scale(.97);
-    opacity: 0;
-    transition: transform .4s var(--ease), opacity .4s var(--ease);
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 16px 20px 17px;
+    background: var(--ground);
+    border: 1px solid var(--ink);
+    max-width: min(30rem, calc(100vw - 32px));
   }
-  #scrim.show #card { transform: none; opacity: 1; }
+  #card.error { border-color: var(--alarm); }
 
+  /* A blinking block rather than a spinner: mechanical, and it costs one
+     keyframe. step-end so it snaps instead of pulsing. */
   #spinner {
-    width: 26px; height: 26px; flex: none;
-    border-radius: 50%;
-    border: 2.5px solid rgba(255, 255, 255, .16);
-    border-top-color: var(--accent);
-    animation: spin .8s linear infinite;
+    width: 9px; height: 9px; flex: none; margin-top: 4px;
+    background: var(--ink);
+    animation: blink 1s step-end infinite;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  #card.error #spinner { background: var(--alarm); animation-duration: .5s; }
+  @keyframes blink { 50% { opacity: 0; } }
 
-  #msg { margin: 0; font-weight: 600; letter-spacing: .1px; }
-  #detail { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
-  #detail code {
-    color: var(--fg); background: rgba(255, 255, 255, .08);
-    padding: 1px 5px; border-radius: 5px;
+  #msg {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 17px; font-weight: 400;
+    letter-spacing: .01em;
   }
+  #card.error #msg { color: var(--alarm); }
+  #detail {
+    margin: 7px 0 0;
+    font-size: 11px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  #detail code { font: inherit; color: var(--ink); }
 
-  /* error variant: stop spinning, pulse the card edge */
-  #card.error { animation: edge 1.6s var(--ease) infinite; }
-  #card.error #spinner {
-    animation: none;
-    border-color: rgba(255, 92, 92, .25); border-top-color: var(--err);
-  }
-  @keyframes edge {
-    0%, 100% { border-color: var(--line); }
-    50%      { border-color: rgba(255, 92, 92, .65); }
-  }
-
-  /* --- print progress bar -------------------------------------------- */
-  /* Absent unless a print is running: no bar, no empty placeholder. */
-  #print {
-    left: 0; right: 0;
-    bottom: max(14px, env(safe-area-inset-bottom));
-    padding: 0 14px 0 14px;
-    display: flex; justify-content: center;
-    opacity: 0; transform: translateY(6px);
-    transition: opacity .35s var(--ease), transform .35s var(--ease);
-  }
-  #print.show { opacity: 1; transform: none; }
-  #print[hidden] { display: none; }
-
-  #print-inner {
-    width: min(30rem, 100%);
-    padding: 9px 13px 11px;
-    border-radius: 12px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    backdrop-filter: blur(10px);
-  }
-  #print-row {
-    display: flex; align-items: baseline; gap: 10px;
-    font-size: 12px; color: var(--muted);
-    margin-bottom: 7px;
-  }
-  #print-pct {
-    font-size: 13px; font-weight: 600; color: var(--fg);
-    font-variant-numeric: tabular-nums;
-  }
-  #print-row .sep { flex: 1; }
-  /* The real filament colour, straight off the printer. Ringed so that white
-     and black both read against the panel. */
-  #print-swatch {
-    width: 9px; height: 9px; border-radius: 50%;
-    flex: none; display: none;
-    border: 1px solid rgba(255, 255, 255, .45);
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
-  }
-  #print-swatch.show { display: inline-block; }
-  #print-row b { font-weight: 500; color: var(--fg); font-variant-numeric: tabular-nums; }
-
-  #print-track {
-    height: 4px; border-radius: 999px;
-    background: rgba(255, 255, 255, .14);
-    overflow: hidden;
-  }
-  #print-fill {
-    height: 100%; width: 0%;
-    border-radius: 999px;
-    background: var(--accent);
-    transition: width .6s var(--ease);
-  }
-  /* A paused print shouldn't look like it is still advancing. */
-  #print-inner.paused #print-fill { background: var(--muted); }
-
-  /* --- chrome --------------------------------------------------------- */
+  /* ---------- chrome ---------- */
   .chrome {
     position: fixed; z-index: 4;
     opacity: 1;
-    transition: opacity .3s var(--ease);
+    transition: opacity .2s linear;
     pointer-events: none;
   }
   .chrome > * { pointer-events: auto; }
@@ -163,39 +108,135 @@
 
   #topbar {
     top: 0; left: 0; right: 0;
-    padding: max(12px, env(safe-area-inset-top)) 14px 26px;
-    background: linear-gradient(to bottom, rgba(0, 0, 0, .6), transparent);
+    padding: 13px 16px 12px;
+    background: var(--ground);
+    border-bottom: 1px solid var(--rule);
   }
-  #title { font-weight: 600; letter-spacing: .2px; }
+  #title {
+    font-family: var(--serif);
+    font-size: 12px; font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: .26em;
+  }
 
   #toolbar {
-    right: 14px; bottom: max(14px, env(safe-area-inset-bottom));
-    display: flex; gap: 8px;
-    transition: bottom .35s var(--ease);
+    right: 16px; bottom: 16px;
+    display: flex; gap: -1px;
+    transition: bottom .2s linear;
   }
-  /* lift the buttons clear of the progress bar while a print is running */
-  body.printing #toolbar { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 68px); }
+  body.printing #toolbar { bottom: 74px; }
   button {
-    width: 42px; height: 42px; padding: 0;
+    width: 38px; height: 38px; padding: 0;
     display: grid; place-items: center;
-    border-radius: 12px; cursor: pointer;
-    background: var(--panel); border: 1px solid var(--line); color: var(--fg);
-    backdrop-filter: blur(10px);
-    transition: background .18s var(--ease), transform .12s var(--ease),
-                border-color .18s var(--ease);
+    background: var(--ground);
+    border: 1px solid var(--rule);
+    color: var(--ink);
+    cursor: pointer;
+    margin-left: -1px;             /* shared hairlines, like a fascia */
+    transition: background .12s linear, color .12s linear;
   }
-  button:hover { background: rgba(44, 50, 60, .9); border-color: rgba(255,255,255,.22); }
-  button:active { transform: scale(.93); }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:first-child { margin-left: 0; }
+  button:hover, button:focus-visible {
+    background: var(--ink); color: var(--ground);
+    border-color: var(--ink);
+    outline: none;
+  }
   button svg {
-    width: 19px; height: 19px; fill: none; stroke: currentColor;
-    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    width: 17px; height: 17px; fill: none; stroke: currentColor;
+    stroke-width: 1.4; stroke-linecap: butt; stroke-linejoin: miter;
   }
-  /* spin the reconnect glyph while a reconnect is pending */
-  body.busy #btn-reload svg { animation: spin 1.4s linear infinite; }
+
+  /* ---------- print readout ---------- */
+  /* A full-width band, not a floating card: it belongs to the frame edge. */
+  #print {
+    left: 0; right: 0; bottom: 0;
+    opacity: 0;
+    transition: opacity .25s linear;
+  }
+  #print.show { opacity: 1; }
+  #print[hidden] { display: none; }
+
+  #print-inner {
+    background: var(--ground);
+    border-top: 1px solid var(--rule);
+  }
+
+  #print-row { display: flex; align-items: stretch; }
+  .cell {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 9px 14px 10px;
+    border-left: 1px solid var(--rule);
+    min-width: 0;
+  }
+  .cell:first-child { border-left: 0; }
+  .cell em {
+    font-style: normal; font-size: 9.5px;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--dim);
+  }
+  .cell b {
+    font-weight: 500; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  /* Modifiers below deliberately match the base `.cell` specificity and rely
+     on order. Keep the base selectors id-free or these stop applying. */
+  /* the percentage carries the weight, set in the serif at display size */
+  .cell--pct { flex: none; align-items: baseline; flex-direction: row; gap: 8px; }
+  .cell--pct b {
+    font-family: var(--serif);
+    font-size: 26px; font-weight: 600; line-height: 1;
+  }
+  /* the sign set apart from the figure: Bodoni's percent glyph is too busy
+     next to a 26px numeral, and this keeps the figure doing the work */
+  .cell--pct u {
+    text-decoration: none;
+    font-size: 11px; color: var(--dim);
+    margin-left: -3px;
+  }
+  .cell--pct i {
+    font-style: normal; font-size: 9.5px;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--alarm);
+  }
+  .cell--fil b { display: flex; align-items: center; gap: 7px; }
+  .cell--spring { flex: 1; border-left: 1px solid var(--rule); }
+
+  /* a square, ringed so white and black filament both read */
+  #print-swatch {
+    width: 10px; height: 10px; flex: none; display: none;
+    border: 1px solid var(--ink);
+  }
+  #print-swatch.show { display: block; }
+
+  /* the progress rule: square ends, linear motion, no easing flourish */
+  #print-track {
+    height: 5px;
+    border-top: 1px solid var(--rule);
+    background: var(--ground);
+  }
+  #print-fill {
+    height: 100%; width: 0%;
+    background: var(--ink);
+    transition: width .5s linear;
+  }
+  #print-inner.paused #print-fill {
+    /* hatched rather than solid, so a hold is legible at a glance */
+    background: repeating-linear-gradient(90deg,
+      var(--dim) 0 4px, transparent 4px 8px);
+  }
 
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      transition-duration: .01ms !important;
+    }
+  }
+  @media (max-width: 40rem) {
+    #print-row { flex-wrap: wrap; }
+    .cell { padding: 7px 11px 8px; }
+    .cell--pct b { font-size: 20px; }
+    .cell--spring { display: none; }
+    body.printing #toolbar { bottom: 108px; }
   }
 </style>
 </head>
@@ -205,10 +246,10 @@
 
 <div id="scrim" class="show">
   <div id="card">
-    <div id="spinner"></div>
+    <span id="spinner"></span>
     <div>
-      <p id="msg">Connecting to the printer…</p>
-      <p id="detail">stream <code id="d-src"></code> · <code id="d-mode"></code></p>
+      <p id="msg">Connecting to the printer</p>
+      <p id="detail">stream <code id="d-src"></code> / transport <code id="d-mode"></code></p>
     </div>
   </div>
 </div>
@@ -218,14 +259,15 @@
 <div class="chrome" id="print" hidden>
   <div id="print-inner">
     <div id="print-row">
-      <span id="print-pct">0%</span>
-      <span id="print-swatch"></span>
-      <span id="print-fil-type"></span>
-      <span id="print-state"></span>
-      <span class="sep"></span>
-      <span>elapsed <b id="print-elapsed">-</b></span>
-      <span>left <b id="print-left">-</b></span>
-      <span><b id="print-fil">-</b></span>
+      <span class="cell cell--pct"><b id="print-pct">0</b><u>%</u><i id="print-state"></i></span>
+      <span class="cell cell--fil">
+        <em>Filament</em>
+        <b><span id="print-swatch"></span><span id="print-fil-type">&mdash;</span></b>
+      </span>
+      <span class="cell"><em>Elapsed</em><b id="print-elapsed">&mdash;</b></span>
+      <span class="cell"><em>Remaining</em><b id="print-left">&mdash;</b></span>
+      <span class="cell"><em>Used</em><b id="print-fil">&mdash;</b></span>
+      <span class="cell cell--spring"></span>
     </div>
     <div id="print-track"><div id="print-fill"></div></div>
   </div>
@@ -233,13 +275,13 @@
 
 <div class="chrome" id="toolbar">
   <button id="btn-snap" title="Save a snapshot" aria-label="Save a snapshot">
-    <svg viewBox="0 0 24 24"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.7l1.2-2h7.2l1.2 2h1.7A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg>
+    <svg viewBox="0 0 24 24"><path d="M3 7h4l1.5-2h7L17 7h4v12H3z"/><circle cx="12" cy="13" r="3.6"/></svg>
   </button>
   <button id="btn-full" title="Fullscreen" aria-label="Fullscreen">
     <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
   </button>
   <button id="btn-reload" title="Reconnect" aria-label="Reconnect">
-    <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+    <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 0-3 6.2"/><path d="M20 4v8h-8"/></svg>
   </button>
 </div>
 
@@ -571,7 +613,7 @@ function showPrint(d) {
   document.body.classList.add('printing');
   printInner.classList.toggle('paused', !!d.paused);
 
-  el.pct.textContent = Math.round(d.progress * 100) + '%';
+  el.pct.textContent = Math.round(d.progress * 100);
   el.fill.style.width = (d.progress * 100).toFixed(1) + '%';
   el.state.textContent = d.paused ? 'paused' : '';
   el.elapsed.textContent = duration(d.elapsed_s);
