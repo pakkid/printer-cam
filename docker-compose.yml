@@ -5,26 +5,35 @@ services:
     container_name: printer-cam
     restart: unless-stopped
 
-    # Overrides layered on top of the baked-in /config/go2rtc.yaml. go2rtc
-    # accepts repeated -config flags and merges them in order, and a value
-    # starting with "{" is read as inline JSON. The ${...} substitutions are
-    # done by Docker Compose (and by Portainer's stack environment variables)
-    # before the container ever starts.
+    # These are read by go2rtc itself at startup (see config/go2rtc.yaml).
+    # Change one here -- or in .env, or in Portainer's stack Environment
+    # variables -- and redeploy; there is nothing to edit inside the image.
+    environment:
+      # LAN address of the Creality K2 / K2 Plus.
+      PRINTER_IP: ${PRINTER_IP:-192.168.1.17}
+
+      # HTTP basic auth for the viewer. Leave AUTH_USER empty to disable it
+      # (e.g. if the tunnel in front already authenticates).
+      AUTH_USER: ${AUTH_USER:-}
+      AUTH_PASS: ${AUTH_PASS:-}
+
+      # Set to <docker-host-lan-ip>:8555 for real-time WebRTC playback.
+      # Without it go2rtc can only advertise the container's internal 172.x
+      # address, which no browser can reach, and viewers fall back to MSE
+      # (~0.6s behind live instead of real-time). Empty is harmless.
+      WEBRTC_CANDIDATE: ${WEBRTC_CANDIDATE:-}
+
     command:
       - go2rtc
       - -config=/config/go2rtc.yaml
-      - -config={"streams":{"printer":"webrtc:http://${PRINTER_IP:-192.168.1.17}:8000/call/webrtc_local#format=creality"}}
-      - -config={"api":{"username":"${AUTH_USER:-}","password":"${AUTH_PASS:-}"}}
+      # LOG_LEVEL is deliberately applied here rather than as a ${...} inside
+      # go2rtc.yaml: go2rtc treats substituted values as secrets and drops any
+      # log line containing them, and the level string appears in every line.
+      # Docker Compose substitutes this before the container starts instead.
       - -config={"log":{"level":"${LOG_LEVEL:-info}"}}
-      # Set WEBRTC_CANDIDATE to <docker-host-lan-ip>:8555 to get real-time
-      # WebRTC playback on the LAN. Without it, go2rtc can only advertise the
-      # container's internal 172.x address, which no browser can reach, and
-      # viewers silently fall back to MSE (~1.5s behind live instead of
-      # real-time). An empty value is harmless.
-      - -config={"webrtc":{"candidates":["${WEBRTC_CANDIDATE:-}"]}}
 
     ports:
-      # Viewer + WebSocket stream. This is the only port the tunnel needs.
+      # Viewer + WebSocket stream. This is the only port a tunnel needs.
       - "${HTTP_PORT:-1984}:1984"
 
       # WebRTC. Only actually used once WEBRTC_CANDIDATE is set, but harmless
@@ -33,7 +42,7 @@ services:
       - "8555:8555/udp"
 
     # go2rtc is a single static Go binary that only re-muxes H.264 here.
-    # This ceiling is far above what it actually uses (~15 MB).
+    # This ceiling is far above what it actually uses (~15-25 MB).
     mem_limit: 256m
 
     healthcheck:

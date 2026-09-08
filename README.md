@@ -109,7 +109,8 @@ interval, for the record, is ~1.04 real seconds.
 build the image (it is a two-line `Dockerfile` over the upstream go2rtc image)
 and start it.
 
-Set these under **Environment variables**:
+Set these under **Environment variables** (locally, copy `.env.example` to
+`.env` instead -- Compose reads it automatically):
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -249,13 +250,24 @@ the WebSocket. The viewer's `onclose` checks `pcState` before reporting a
 disconnect, otherwise the UI flashes "reconnecting" over a perfectly live
 stream.
 
-**Config layering.** `config/go2rtc.yaml` is static and baked into the image;
-`docker-compose.yml` layers your environment on top by passing extra `-config`
-arguments containing inline JSON. That is deliberate. go2rtc does support
-`${VAR}` substitution inside the YAML, but it registers every substituted value
-as a "secret" and its log redaction writer then returns a short byte count,
-which corrupts its own log output (`zerolog: could not write event`). Compose
-does the substitution instead, before the container starts.
+**Config is env-driven, with one deliberate exception.**
+`config/go2rtc.yaml` reads `PRINTER_IP`, `AUTH_USER`, `AUTH_PASS` and
+`WEBRTC_CANDIDATE` through go2rtc's own `${VAR:default}` substitution, so
+changing the printer's address means editing `.env` (or the Portainer stack's
+environment variables) and redeploying. Nothing inside the image hardcodes it.
+
+`LOG_LEVEL` is the exception and is applied by `docker-compose.yml` as a
+`-config` override instead. go2rtc registers every value it substitutes as a
+"secret" and redacts it from log output, and its redacting writer returns a
+short byte count, so **any log line containing a substituted value is dropped**
+with `zerolog: could not write event`. For the log level that string appears in
+every line, which loses the whole log. Compose substitutes it before the
+container starts, which avoids the mechanism entirely.
+
+The same quirk has a small cost for `PRINTER_IP`: at `LOG_LEVEL=debug` the two
+`start producer` / `stop producer` lines contain the address and are therefore
+dropped. Everything else logs normally, and at `info` nothing is affected. For
+`AUTH_PASS` the redaction is the point -- the password never reaches the log.
 
 **`www/video-rtc.js` is vendored** from go2rtc v1.9.14 (MIT). It is the
 upstream player component -- WebSocket signalling, MSE buffering, reconnect --

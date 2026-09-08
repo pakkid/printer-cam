@@ -273,6 +273,7 @@ class PrinterCam extends VideoRTC {
     /** media seconds per wall second; 0 until measured */
     let ratio = 0;
     let sampleWall = 0, sampleEnd = 0;
+    let lastResync = 0;
 
     /** @type {MediaSource} */
     const Managed = 'ManagedMediaSource' in window;
@@ -341,9 +342,23 @@ class PrinterCam extends VideoRTC {
         // Only intervene if playback is stranded outside the buffer entirely.
         if (v.currentTime < sb.buffered.start(0)) v.currentTime = sb.buffered.start(0);
 
+        const realGap = (end - v.currentTime) / ratio;
+
+        // Big backlogs need a jump, not a nudge. Leaving a tab hidden pauses
+        // playback while data keeps arriving, and coming back 20s behind would
+        // take over a minute to drain at the gentle rate below. A seek is safe
+        // here: the keyframe interval is ~1s, so anything a couple of seconds
+        // inside the buffer lands on a decodable point. (This is only true
+        // because the interval is short -- seeking to the live *edge* still
+        // isn't reliable, and isn't what this does.)
+        if (realGap > bufferSeconds * 3 && now - lastResync > 5) {
+          lastResync = now;
+          v.currentTime = end - Math.min(bufferSeconds * 0.5, 2) * ratio;
+          return;
+        }
+
         // --- play at the rate media is actually arriving, plus a nudge to
         // settle on TARGET seconds of latency ---
-        const realGap = (end - v.currentTime) / ratio;
         const trim = Math.max(-0.15, Math.min(0.25, (realGap - TARGET) * 0.15));
         const rate = Math.max(0.5, Math.min(20, ratio * (1 + trim)));
         if (Math.abs(v.playbackRate - rate) > 0.02) v.playbackRate = rate;
