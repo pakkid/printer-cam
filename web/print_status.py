@@ -121,37 +121,6 @@ def write_gate(enabled):
     os.replace(tmp, GATE_FILE)      # atomic: nginx never reads a half-written file
 
 
-def sever_streams():
-    """Cut every established stream, WebRTC included.
-
-    Turning the gate on stops new requests, but an existing WebRTC session
-    does not go through the front door at all: its media flows browser <->
-    go2rtc:8555 directly, and the signalling WebSocket has already been closed
-    by the player after handover, so there is nothing here left to drop.
-
-    go2rtc's /api/restart re-execs the process, which tears down every peer
-    connection at once. That endpoint is reachable only from inside this
-    network -- go2rtc's port is not published, and the front door denies the
-    path on its public listener.
-    """
-    url = "http://%s:%s/api/restart" % (UPSTREAM_HOST, UPSTREAM_PORT)
-    req = urllib.request.Request(url, data=b"", method="POST")
-    if AUTH_USER:
-        token = base64.b64encode(
-            ("%s:%s" % (AUTH_USER, AUTH_PASS)).encode()
-        ).decode()
-        req.add_header("Authorization", "Basic " + token)
-    try:
-        urllib.request.urlopen(req, timeout=TIMEOUT).close()
-        return True
-    except urllib.error.HTTPError as e:
-        # go2rtc answers the restart by exec'ing, so a truncated reply here is
-        # success, not failure.
-        return e.code < 500
-    except (OSError, TimeoutError):
-        return False
-
-
 def set_switch(enabled):
     with _switch_lock:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -164,12 +133,21 @@ def set_switch(enabled):
         # already watching over the front door, instead of letting their
         # stream run on.
         subprocess.run(["nginx", "-s", "reload"], check=False, timeout=15)
-        if not enabled:
-            # ...and this deals with WebRTC, which bypasses the front door.
-            if not sever_streams():
-                print("printer-cam-web: could not restart go2rtc; an already "
-                      "established WebRTC session may survive", flush=True)
     return read_switch()
+    # Note on WebRTC, because this used to restart go2rtc here and no longer
+    # does. Restarting it severed established peer connections, whose media
+    # bypasses the front door entirely -- but go2rtc cannot tell which listener
+    # a peer arrived through, so that also killed the always-on LAN viewer,
+    # which is the one thing the switch must not touch.
+    #
+    # It costs nothing in practice: WebRTC media needs port 8555 reachable from
+    # the browser, and a tunnel forwarding only the public HTTP port gives a
+    # remote viewer no route to it. Remote viewers are therefore on MSE, which
+    # the nginx reload above does cut, in about three seconds.
+    #
+    # The exception is forwarding TCP 8555 through the tunnel for remote
+    # WebRTC. Do not do that if you rely on the switch: such a session would
+    # survive it. Use the MSE fallback remotely instead.
 
 
 _lock = threading.Lock()

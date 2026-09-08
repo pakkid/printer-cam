@@ -26,6 +26,11 @@ services:
       AUTH_USER: ${AUTH_USER:-}
       AUTH_PASS: ${AUTH_PASS:-}
 
+      # Who may reach the always-on LAN viewer on LAN_PORT. Same posture as
+      # the switch: a port your tunnel does not forward, with an allowlist on
+      # top. This listener is never gated by the switch.
+      LAN_ALLOW: ${LAN_ALLOW:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1}
+
       # Who may reach the on/off switch. Defence in depth only -- the real
       # separation is that the switch listens on ADMIN_PORT, which your tunnel
       # does not forward. Narrow it to your own subnet if you like, but note
@@ -45,6 +50,12 @@ services:
       # route to it. Bind it to a single interface if you want to go further,
       # e.g. ADMIN_BIND=192.168.1.50 to expose it on one NIC only.
       - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_PORT:-1985}:81"
+
+      # The always-on LAN viewer. Not gated by the switch, so it keeps working
+      # while the public port is refusing everything. WebRTC works here because
+      # a LAN browser can reach go2rtc's media port directly.
+      # Do NOT forward this one through your tunnel either.
+      - "${LAN_BIND:-0.0.0.0}:${LAN_PORT:-1986}:82"
 
     # Keeps the switch position across a restart or a recreate.
     volumes:
