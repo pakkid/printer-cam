@@ -159,14 +159,14 @@ somebody is watching, switching off also stops the camera being read at all.
 ## Print progress overlay
 
 While a print is running, a bar appears over the bottom of the video with
-percentage, filament type and colour, elapsed time, time remaining and
-filament used. When nothing is printing there is no bar and no placeholder.
+percentage, filament type and colour, elapsed time and filament used. When
+nothing is printing there is no bar and no placeholder.
 
 It reads one endpoint, `/print`, which returns only:
 
 ```json
 {"printing": true, "paused": false, "progress": 0.386,
- "elapsed_s": 1621, "remaining_s": 2579, "filament_m": 5.03,
+ "elapsed_s": 1621, "filament_m": 5.03,
  "filament_type": "PLA", "filament_name": "Soleyin Ultra PLA",
  "filament_color": "#ffffff", "filament_g": 15.0}
 ```
@@ -181,15 +181,13 @@ trigger an emergency stop. Putting that behind a tunnel would be reckless. Only
 the front-door container talks to it, over a single fixed read-only query, and
 `/print` refuses anything but `GET`.
 
-Two of the four numbers are derived, because this printer's Moonraker reports
-`slicer: Unknown` and leaves `estimated_time`, `filament_total` and
-`filament_weight_total` null -- it does not parse slicer metadata at all:
+**There is deliberately no time-remaining figure.** This printer's Moonraker
+reports `slicer: Unknown` and leaves `estimated_time` null -- it does not parse
+slicer metadata at all -- so the only way to produce one is to extrapolate from
+elapsed time and progress. That assumes every remaining layer takes as long as
+the average layer so far, which on a real print is wrong often enough to be
+worse than showing nothing.
 
-- **Time remaining** comes from elapsed time and progress, not from a slicer
-  estimate. That makes it an extrapolation: reasonable once a print is
-  underway, meaningless at the very start, so it reads `--` until progress
-  passes 0.5%. It also assumes an even pace, so it will drift on a print whose
-  later layers are much slower.
 - **Filament is reported in metres**, straight from the extruded length that
   Klipper tracks. That is a unit conversion and nothing more, so it is exact.
 - **Grams are derived** from the filament type, which the printer does report --
@@ -197,6 +195,31 @@ Two of the four numbers are derived, because this printer's Moonraker reports
   unknown or unrecognised, grams are omitted rather than invented.
 
 The overlay also shows the filament type and a swatch of its actual colour.
+
+### Why the numbers move between polls
+
+`/print` is polled every three seconds. Left alone that makes the fascia read
+as a stale snapshot -- the clock jumping in three-second steps, the bar
+hopping -- so the viewer fills in the gaps, with different treatment for
+different kinds of figure:
+
+- **Elapsed time** is extrapolated exactly: the polled value plus how long ago
+  it was polled. It is wall-clock time, so there is nothing to guess. It holds
+  still while a print is paused, because Klipper's own `print_duration` stops
+  then too. Seconds are shown past the hour (`1h12m07s`) precisely so it keeps
+  ticking on the long prints where that matters.
+- **Progress and filament used** are interpolated *towards* the last reading
+  and never past it. Extrapolating those would mean inventing an extrusion
+  rate, and a running total that overshoots and then walks backwards reads as a
+  bug rather than as precision. This costs up to one poll of lag and never
+  shows a figure that was not genuinely true. Grams follow from the server's
+  own grams-per-metre, so the two never disagree.
+
+The interpolation is linear rather than eased: these quantities really do
+advance at a steady rate, so with regular polls the display reaches reading N
+just as N+1 arrives and the velocity stays continuous. It runs on
+`requestAnimationFrame`, which stops by itself in a background tab, and the
+loop is torn down entirely when no print is running.
 
 ### Where the filament type comes from
 
@@ -261,9 +284,107 @@ the printer over SSH, which this project deliberately does not do -- and the
 printer's SoC is a 2-core ARMv7, so 720p60 is unlikely to be reachable there
 in any case.
 
+Re-measured since: **893 frames in 60.0s = 14.9 fps**, with 57 IDRs, so a
+keyframe interval of ~1.05 real seconds.
+
 Note this is separate from the ~1.5 fps *rendering* bug described under
-Latency, which was a timestamp problem in playback and is fixed. The keyframe
-interval, for the record, is ~1.04 real seconds.
+Latency, which was a timestamp problem in playback and is fixed.
+
+## Artifacts, and why no error correction can fix them
+
+The picture smears and blocks every few seconds. That is **packet loss on the
+printer's wifi**, and it is unrecoverable from this end. The measurements, all
+taken on the LAN with nothing else in the path:
+
+| | |
+|---|---|
+| Printer's only network interface | `wlan0` -- there is no wired link up |
+| Media transport | UDP, ~465 packets/s, ~2.0 Mbit/s |
+| RTP packets lost in 61.2s | **200 of 28,619 = 0.699%** |
+| Loss events | 17 bursts, the largest 32 consecutive packets |
+| Retransmissions received | **0** |
+| Resulting decode faults | ~7 per minute (`Invalid NAL unit size`, `deblocking_filter_idc out of range`, `corrupt decoded frame`) |
+
+Bursts of thirty packets are the signature of interference or a contended
+channel, not of anything software is doing.
+
+**There is no ECC to add.** Every mechanism that could repair this is either
+absent or refused:
+
+- **FEC** (ULPFEC / FlexFEC / RED) is never negotiated. go2rtc strips those
+  codecs from its capability list outright (`pkg/webrtc/helpers.go`), and the
+  printer does not offer them in its answer either. Neither end would use it.
+- **NACK** *is* negotiated -- the printer's SDP answer carries
+  `a=rtcp-fb:98 nack` and `a=rtcp-fb:98 nack pli`, and go2rtc duly asks. In 45
+  seconds it sent **78 NACK requests and received not one retransmission**; the
+  printer sends no RTCP at all, not even a sender report. It advertises the
+  feature and does not implement it. Requesting harder cannot help.
+- **ICE-TCP** would give retransmission for free, and the printer does offer a
+  passive TCP candidate. go2rtc cannot take it: its WebRTC *client* is built
+  with no TCP mux (`clientAPI, _ = webrtc.NewAPI()` in
+  `internal/webrtc/webrtc.go`), so it gathers UDP candidates only. No config
+  option changes this -- it would need a patched go2rtc.
+
+### What the loss actually looks like
+
+Measured in the browser over 120 seconds on each transport, same camera, same
+minute-to-minute conditions:
+
+| | WebRTC | MSE |
+|---|---|---|
+| Packets lost on *this* leg | 0 | n/a (TCP) |
+| Frames received | 1783 | -- |
+| Frames decoded | 1647 | -- |
+| **Frames discarded as incomplete** | **128 (7.2%)** | none discarded -- rendered instead |
+| Keyframe requests sent | 39 | cannot send any |
+| Freezes | 13, totalling **11.2s (9.3%)** | continuous reconnect loop |
+| Decoded frame rate | 13.7 fps | unusable |
+
+So the 0.699% packet loss upstream costs **7.2% of frames**, because a burst
+destroys the frame it hits and then every P-frame that references it until the
+next IDR. On WebRTC that reads as roughly one hitch every nine seconds, each
+about as long as the keyframe interval. The browser asks for an early keyframe
+39 times; the printer ignores all of them, so each freeze runs its full ~1s.
+
+MSE was worse than "artifacts": Chrome raises `MEDIA_ERR_DECODE` on the damaged
+bitstream and the decoder stops. video-rtc.js closes the WebSocket, and its
+`onclose()` waits `RECONNECT_TIMEOUT - (now - connectTS)` -- with a fault every
+~8 seconds the stream is never up for the full 15, so nearly the whole 15s
+penalty was charged for each one and the viewer never held a picture. The
+viewer now recovers immediately from a decode fault instead (see
+`onDecodeFault()` in `www/index.html`), rate-limited to eight in ten seconds so
+a genuinely broken stream still backs off, and it suppresses the reconnect
+overlay for 1.5s so a sub-second recovery does not flash the whole UI. The
+measured media/wall ratio the MSE controller depends on is also kept on the
+instance now, so a recovery resumes at speed instead of re-deriving it from
+scratch -- which used to take longer than the gap between faults.
+
+That makes MSE degraded rather than broken, and no more than that: at seven
+faults a minute it still cannot hold a steady rate. **MSE is a fallback, not a
+second option.** If the picture matters, make WebRTC work.
+
+What actually helps, in order:
+
+1. **Put the printer on ethernet.** This is the fix. Loss goes to roughly zero
+   and everything below becomes moot.
+2. **Improve the wifi** -- 5 GHz, a clearer channel, or an AP closer to the
+   printer. 0.699% is not a marginal link; it is a bad one.
+3. **Stay on WebRTC.** This does not reduce loss, but it changes what loss
+   looks like, which is most of the perceived problem. The browser's WebRTC
+   decoder knows when a frame is incomplete and discards it, so damage reads as
+   a brief hitch that clears at the next keyframe. MSE has no such check: the
+   damaged bitstream goes straight to the media element and is rendered, and
+   the smear persists for up to a keyframe interval. MSE also has to honour the
+   printer's RTP timestamps, which are junk, so it stutters as well.
+
+Because of that last point the viewer now **names its transport**. If it falls
+back to MSE a notice says so, top left, with the reason -- almost always that
+8555 is not reachable and `WEBRTC_CANDIDATE` is unset. In the healthy WebRTC
+case nothing is shown.
+
+And note that raising the frame rate, if it were possible, would make this
+*worse*: twice the packets across the same lossy channel, at half the bits per
+frame.
 
 ## Deploying in Portainer
 

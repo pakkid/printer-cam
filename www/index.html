@@ -106,6 +106,30 @@
   .chrome > * { pointer-events: auto; }
   body.idle .chrome { opacity: 0; }
 
+  /* Only ever shown when the transport has degraded to MSE. In the healthy
+     case nothing appears -- there is deliberately no "live" badge. */
+  #degraded {
+    left: 16px; top: 16px;
+    max-width: 34ch;
+    padding: 8px 10px;
+    background: var(--ground);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--alarm);
+    font-size: 11px; line-height: 1.45;
+    letter-spacing: .01em;
+  }
+  #degraded b {
+    display: block;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--alarm);
+  }
+  #degraded span { color: var(--dim); }
+  /* while the scrim is up the notice would sit on top of it; the scrim's own
+     message is the one that matters then */
+  body.busy #degraded { display: none; }
+
   #toolbar {
     right: 16px; bottom: 16px;
     display: flex; gap: -1px;
@@ -204,7 +228,8 @@
   #print-fill {
     height: 100%; width: 0%;
     background: var(--ink);
-    transition: width .5s linear;
+    /* deliberately no width transition: paintFascia() eases this itself, once
+       per frame, and a CSS transition restarted every frame would only lag */
   }
   #print-inner.paused #print-fill {
     /* hatched rather than solid, so a hold is legible at a glance */
@@ -241,6 +266,12 @@
   </div>
 </div>
 
+<div class="chrome" id="degraded" hidden>
+  <b>MSE fallback</b>
+  <span>WebRTC could not be reached, so lost packets show as smearing and the
+  motion stutters. Publish UDP+TCP 8555 and set <code>WEBRTC_CANDIDATE</code>.</span>
+</div>
+
 <div class="chrome" id="print" hidden>
   <div id="print-inner">
     <div id="print-row">
@@ -250,7 +281,6 @@
         <b><span id="print-swatch"></span><span id="print-fil-type">&mdash;</span></b>
       </span>
       <span class="cell"><em>Elapsed</em><b id="print-elapsed">&mdash;</b></span>
-      <span class="cell"><em>Remaining</em><b id="print-left">&mdash;</b></span>
       <span class="cell"><em>Used</em><b id="print-fil">&mdash;</b></span>
       <span class="cell cell--spring"></span>
     </div>
@@ -316,21 +346,62 @@ const aspect = (() => {
 const bufferSeconds = Math.max(2, Number(params.get('buffer')) || 6);
 
 document.getElementById('d-src').textContent  = src;
-document.getElementById('d-mode').textContent = mode;
+const modeEl = document.getElementById('d-mode');
+modeEl.textContent = mode;
 
 const scrim = document.getElementById('scrim');
 const card  = document.getElementById('card');
 const msgEl = document.getElementById('msg');
 
-/** @param {'live'|'connecting'|'error'} state */
+const degradedEl = document.getElementById('degraded');
+
+// Pending "connecting" report, deferred during a fast MSE recovery.
+// See reportConnecting() and PrinterCam.onDecodeFault().
+let graceTID = 0;
+
+/**
+ * Which transport won matters more than it looks. The printer streams over its
+ * own wifi and loses ~0.7% of RTP packets in bursts, and it advertises `nack`
+ * without implementing it -- it never retransmits, so nothing downstream can
+ * recover a lost packet. What differs is how the loss is *shown*:
+ *
+ *   WebRTC  the browser's decoder knows a frame is incomplete and drops it,
+ *           so loss reads as a brief hitch and clears at the next keyframe.
+ *   MSE     the damaged bitstream goes straight to the media element, which
+ *           renders it -- smeared blocks that persist for up to a keyframe
+ *           interval. The printer's RTP timestamps are junk too, and only MSE
+ *           has to honour them, so it stutters as well.
+ *
+ * MSE is therefore a fault worth naming, not a quiet fallback.
+ *
+ * @param {'live'|'connecting'|'error'} state
+ */
 function setState(state, transport) {
+  clearTimeout(graceTID);
+  graceTID = 0;
   const busy = state !== 'live';
   document.body.classList.toggle('busy', busy);
   scrim.classList.toggle('show', busy);
   card.classList.toggle('error', state === 'error');
   if (state === 'error')           msgEl.textContent = 'Stream error — retrying…';
   else if (state === 'connecting') msgEl.textContent = 'Connecting to the printer…';
-  if (transport) console.info('[printer-cam] transport:', transport);
+  if (transport) {
+    console.info('[printer-cam] transport:', transport);
+    modeEl.textContent = transport;
+    degradedEl.hidden = transport === 'WebRTC';
+  }
+}
+
+/**
+ * Report "connecting" now, or -- while recovering from a decode fault -- only
+ * if the recovery has not finished within the grace period. Such a recovery
+ * costs about one init segment, and flashing the whole scrim for that is more
+ * distracting than the single corrupt frame that caused it.
+ */
+function reportConnecting(deferred) {
+  if (!deferred) return setState('connecting');
+  clearTimeout(graceTID);
+  graceTID = setTimeout(() => setState('connecting'), 1500);
 }
 
 class PrinterCam extends VideoRTC {
@@ -340,6 +411,49 @@ class PrinterCam extends VideoRTC {
     this.video.muted = true;       // video-only stream, but keeps autoplay happy
 
     // See the onmse() override below for why playbackRate is left alone here.
+
+    this.fastRecoveries = 0;
+    this.lastFaultTS = 0;
+    this.recovering = false;
+    this.mediaRatio = 0;      // see onmse(); survives MediaSource re-inits
+
+    // Runs after video-rtc.js's own error listener, which has already called
+    // ws.close(); onclose() has not run yet, so onDecodeFault() can still
+    // change what it decides to do.
+    this.video.addEventListener('error', () => {
+      const err = this.video.error;
+      if (err && err.code === 3) this.onDecodeFault();  // MEDIA_ERR_DECODE
+    });
+  }
+
+  /**
+   * A single corrupt frame must not cost fifteen seconds of black.
+   *
+   * The printer loses ~0.7% of its RTP packets in bursts on its wifi and never
+   * retransmits, so damaged frames do reach the browser. On MSE they do not
+   * merely smear: Chrome's decoder raises MEDIA_ERR_DECODE and stops.
+   * video-rtc.js responds by closing the WebSocket, and its onclose() then
+   * waits `RECONNECT_TIMEOUT - (now - connectTS)`. With a fault every ~8
+   * seconds the stream is almost never up for the full 15, so that formula
+   * charges nearly the entire 15s penalty for each one -- and the viewer sits
+   * on "Connecting to the printer" more or less permanently. Measured here:
+   * MSE could not hold a picture at all, while WebRTC ran clean beside it.
+   *
+   * There is nothing to back off from. The server is fine and the network is
+   * fine; one frame was broken. Zeroing connectTS makes that delay compute to
+   * zero, so the retry is immediate and costs one init segment.
+   *
+   * The rate limit is the honest part: if faults arrive faster than this can
+   * absorb them, something worse than packet loss is wrong and upstream's
+   * backoff should get its way.
+   */
+  onDecodeFault() {
+    const now = Date.now();
+    if (now - this.lastFaultTS > 10000) this.fastRecoveries = 0;
+    this.lastFaultTS = now;
+    if (++this.fastRecoveries > 8) return;  // give up; let the backoff run
+    this.connectTS = 0;                     // => onclose() retries at once
+    this.recovering = true;
   }
 
   /**
@@ -372,8 +486,18 @@ class PrinterCam extends VideoRTC {
   onmse() {
     const TARGET = 0.6;   // real seconds behind live to aim for
 
-    /** media seconds per wall second; 0 until measured */
-    let ratio = 0;
+    /**
+     * Media seconds per wall second; 0 until measured.
+     *
+     * Seeded from the instance, not from zero. The ratio describes how wrong
+     * the *printer's* timestamps are, which does not change when a decode
+     * fault forces a new MediaSource -- so re-measuring it from scratch after
+     * every fault is pure loss. It costs ~10s to re-converge, and on this
+     * camera faults arrive every 5-8s, so a restarted controller never gets
+     * there: playback crawls near 1.5 fps indefinitely. Carrying the
+     * measurement over means a recovered stream resumes at full speed.
+     */
+    let ratio = this.mediaRatio || 0;
     let sampleWall = 0, sampleEnd = 0;
     let lastResync = 0;
 
@@ -424,7 +548,10 @@ class PrinterCam extends VideoRTC {
         } else if (now - sampleWall >= 0.4) {
           const inst = (end - sampleEnd) / (now - sampleWall);
           // Ignore nonsense (a stalled feed, or a discontinuity in the source)
-          if (inst > 0.2 && inst < 40) ratio = ratio ? ratio * 0.7 + inst * 0.3 : inst;
+          if (inst > 0.2 && inst < 40) {
+            ratio = ratio ? ratio * 0.7 + inst * 0.3 : inst;
+            this.mediaRatio = ratio;
+          }
           sampleWall = now; sampleEnd = end;
         }
         if (!ratio) return;   // nothing sensible to do until we have a measurement
@@ -486,7 +613,7 @@ class PrinterCam extends VideoRTC {
 
   onconnect() {
     const started = super.onconnect();
-    if (started && this.pcState === WebSocket.CLOSED) setState('connecting');
+    if (started && this.pcState === WebSocket.CLOSED) reportConnecting(this.recovering);
     return started;
   }
 
@@ -494,13 +621,17 @@ class PrinterCam extends VideoRTC {
     const result = super.onopen();
     this.onmessage['ui'] = msg => {
       if (msg.type === 'error') setState('error');
-      else if (['mse', 'mp4', 'hls', 'mjpeg'].includes(msg.type)) setState('live', msg.type.toUpperCase());
+      else if (['mse', 'mp4', 'hls', 'mjpeg'].includes(msg.type)) {
+        this.recovering = false;
+        setState('live', msg.type.toUpperCase());
+      }
     };
     return result;
   }
 
   onpcvideo(ev) {
     super.onpcvideo(ev);
+    this.recovering = false;
     if (this.pcState !== WebSocket.CLOSED) setState('live', 'WebRTC');
   }
 
@@ -508,7 +639,7 @@ class PrinterCam extends VideoRTC {
     // When WebRTC wins the race the player deliberately closes the WebSocket
     // (it sets pcState = OPEN first, then drops the socket). That is a
     // successful handover, not a disconnect, so don't report it as one.
-    if (this.pcState === WebSocket.CLOSED) setState('connecting');
+    if (this.pcState === WebSocket.CLOSED) reportConnecting(this.recovering);
     return super.onclose();
   }
 }
@@ -566,7 +697,7 @@ layout();
 
 // --- print progress --------------------------------------------------
 // Served by the front door at /print, which asks Moonraker and hands back only
-// progress, elapsed, remaining and grams. Moonraker itself is never reachable
+// progress, elapsed and filament used. Moonraker itself is never reachable
 // from the browser: it has no CORS headers, and its API can control the printer.
 const printBar = document.getElementById('print');
 const printInner = document.getElementById('print-inner');
@@ -574,21 +705,93 @@ const el = {
   pct:     document.getElementById('print-pct'),
   state:   document.getElementById('print-state'),
   elapsed: document.getElementById('print-elapsed'),
-  left:    document.getElementById('print-left'),
   fil:     document.getElementById('print-fil'),
   swatch:  document.getElementById('print-swatch'),
   filType: document.getElementById('print-fil-type'),
   fill:    document.getElementById('print-fill'),
 };
 
-/** 4h07m / 12m30s / 45s -- no leading zero units, no false precision. */
+/**
+ * 4h07m12s / 12m30s / 45s -- no leading zero units.
+ *
+ * Seconds are kept even past the hour. This is only ever used for elapsed
+ * time, which is exact rather than estimated, so there is no false precision
+ * in it -- and dropping them would leave the figure sitting still for a minute
+ * at a time on exactly the long prints where a live clock is worth having.
+ */
 function duration(sec) {
   if (sec === null || sec === undefined || !isFinite(sec)) return '\u2014';
   sec = Math.max(0, Math.round(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  if (h) return `${h}h${String(m).padStart(2, '0')}m`;
-  if (m) return `${m}m${String(s).padStart(2, '0')}s`;
+  const ss = String(s).padStart(2, '0');
+  if (h) return `${h}h${String(m).padStart(2, '0')}m${ss}s`;
+  if (m) return `${m}m${ss}s`;
   return `${s}s`;
+}
+
+// How the fascia stays live between polls. /print is polled every three
+// seconds, which unaided makes the clock jump in three-second steps and the
+// bar hop -- the numbers read as a stale snapshot rather than a running job.
+//
+// The two kinds of figure get different treatment, because they deserve
+// different confidence:
+//
+//   elapsed    is wall-clock time and extrapolates exactly: the polled value
+//              plus how long ago it was polled. Held still while paused,
+//              because Klipper's own print_duration stops then too.
+//   progress,  are interpolated *towards* the last polled value and never
+//   filament   past it. Extrapolating those would mean inventing an extrusion
+//              rate, and a running total that overshoots and then walks
+//              backwards reads as a bug rather than as precision. This costs
+//              up to one poll of lag and never shows a figure that was not
+//              genuinely true.
+//
+// requestAnimationFrame is the right clock for this: it stops on its own in a
+// background tab, so a hidden viewer costs nothing.
+const EASE_MS = 3000;          // one poll interval
+const stillFrame = matchMedia('(prefers-reduced-motion: reduce)');
+
+let fascia = null;             // latest reading + what is currently on screen
+let fasciaRAF = 0;
+
+/** Write only on change; this runs up to 60x a second. */
+function put(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function paintFascia(now) {
+  fasciaRAF = 0;
+  if (!fascia) return;
+  const f = fascia;
+
+  const age = (now - f.polledAt) / 1000;
+  put(el.elapsed, duration(f.elapsed + (f.paused ? 0 : age)));
+
+  // Linear towards the reading, clamped at it. Linear rather than eased
+  // because these quantities genuinely advance at a steady rate: with regular
+  // polls the display arrives at reading N just as N+1 lands, so the velocity
+  // is continuous. An ease-out instead decelerates to a stop and then jerks
+  // forward on each poll -- a visible pulse every three seconds.
+  const e = stillFrame.matches ? 1 : Math.min(1, (now - f.polledAt) / EASE_MS);
+
+  const progress = f.from.progress + (f.progress - f.from.progress) * e;
+  put(el.pct, String(Math.round(progress * 100)));
+  const w = (progress * 100).toFixed(2) + '%';
+  if (el.fill.style.width !== w) el.fill.style.width = w;
+
+  let metres = null;
+  if (f.metres == null) {
+    put(el.fil, '\u2014');
+  } else {
+    metres = f.from.metres + (f.metres - f.from.metres) * e;
+    // Grams follow from the server's own grams-per-metre rather than being
+    // eased separately, so the two figures never disagree with each other.
+    put(el.fil, metres.toFixed(2) + ' m' +
+      (f.gPerM != null ? ` \u00b7 ${(metres * f.gPerM).toFixed(0)} g` : ''));
+  }
+
+  f.shown = { progress, metres };
+  fasciaRAF = requestAnimationFrame(paintFascia);
 }
 
 function showPrint(d) {
@@ -598,17 +801,27 @@ function showPrint(d) {
   document.body.classList.add('printing');
   printInner.classList.toggle('paused', !!d.paused);
 
-  el.pct.textContent = Math.round(d.progress * 100);
-  el.fill.style.width = (d.progress * 100).toFixed(1) + '%';
   el.state.textContent = d.paused ? 'paused' : '';
-  el.elapsed.textContent = duration(d.elapsed_s);
-  el.left.textContent = duration(d.remaining_s);
-  // Metres are exact. Grams appear when the density is known -- which it
-  // usually is, because the printer reports the filament type over Creality's
-  // websocket (see web/print_status.py).
-  el.fil.textContent = d.filament_m != null
-    ? d.filament_m.toFixed(2) + ' m' + (d.filament_g != null ? ` \u00b7 ${d.filament_g.toFixed(0)} g` : '')
-    : '\u2014';
+
+  // Carry on from whatever is on screen, so a new reading never snaps.
+  const shown = fascia && fascia.shown;
+  fascia = {
+    polledAt: performance.now(),
+    elapsed:  d.elapsed_s ?? 0,
+    paused:   !!d.paused,
+    progress: d.progress ?? 0,
+    metres:   d.filament_m ?? null,
+    // Metres are exact. Grams appear when the density is known -- which it
+    // usually is, because the printer reports the filament type over
+    // Creality's websocket (see web/print_status.py).
+    gPerM: (d.filament_g != null && d.filament_m > 0) ? d.filament_g / d.filament_m : null,
+    from: {
+      progress: shown ? shown.progress : (d.progress ?? 0),
+      metres:   shown && shown.metres != null ? shown.metres : (d.filament_m ?? 0),
+    },
+  };
+  fascia.shown = { progress: fascia.from.progress, metres: fascia.from.metres };
+  if (!fasciaRAF) fasciaRAF = requestAnimationFrame(paintFascia);
 
   // Filament type and its actual colour, when the printer knows them.
   el.filType.textContent = d.filament_type || '';
@@ -623,6 +836,9 @@ function showPrint(d) {
 }
 
 function hidePrint() {
+  fascia = null;
+  cancelAnimationFrame(fasciaRAF);
+  fasciaRAF = 0;
   printBar.classList.remove('show');
   document.body.classList.remove('printing');
   // wait out the fade before removing it from layout

@@ -8,15 +8,15 @@ and returns nothing else:
 
     {"printing": false}
     {"printing": true, "progress": 0.42, "elapsed_s": 1234,
-     "remaining_s": 1700, "filament_g": 12.3}
+     "filament_m": 5.03, "filament_g": 12.3}
 
-Two of those have to be derived, because the K2's Moonraker reports
-`slicer: Unknown` and leaves `estimated_time`, `filament_total` and
-`filament_weight_total` null -- it does not parse slicer metadata at all:
+There is deliberately no time-remaining figure. The K2's Moonraker reports
+`slicer: Unknown` and leaves `estimated_time` null -- it does not parse slicer
+metadata at all -- so the only way to get one is to extrapolate from elapsed
+time and progress, which assumes every remaining layer takes as long as the
+average layer so far. On a real print that is wrong often enough to be worse
+than saying nothing.
 
-  remaining_s  from elapsed time and progress, not from the slicer's estimate.
-               Unreliable in the first moments of a print, so it is reported as
-               null until progress passes 0.5%.
   filament_m   from the extruded length in mm, which is all Klipper tracks.
                Just a unit conversion, so it involves no guesswork.
 
@@ -322,11 +322,6 @@ def _shape(status):
 
     elapsed = float(stats.get("print_duration") or 0.0)
 
-    # Extrapolating from <0.5% done gives absurd numbers, so say nothing.
-    remaining = None
-    if progress > 0.005 and elapsed > 0:
-        remaining = round(elapsed * (1.0 - progress) / progress)
-
     used_mm = float(stats.get("filament_used") or 0.0)
 
     payload = {
@@ -334,7 +329,6 @@ def _shape(status):
         "paused": state == "paused",
         "progress": round(progress, 4),
         "elapsed_s": round(elapsed),
-        "remaining_s": remaining,
         "filament_m": round(used_mm / 1000.0, 2),
     }
 
