@@ -335,7 +335,7 @@ minute-to-minute conditions:
 | Packets lost on *this* leg | 0 | n/a (TCP) |
 | Frames received | 1783 | -- |
 | Frames decoded | 1647 | -- |
-| **Frames discarded as incomplete** | **128 (7.2%)** | none discarded -- rendered instead |
+| **Frames the decoder rejected** | **128 (7.2%)** | none rejected -- decoder dies instead |
 | Keyframe requests sent | 39 | cannot send any |
 | Freezes | 13, totalling **11.2s (9.3%)** | continuous reconnect loop |
 | Decoded frame rate | 13.7 fps | unusable |
@@ -369,18 +369,50 @@ What actually helps, in order:
    and everything below becomes moot.
 2. **Improve the wifi** -- 5 GHz, a clearer channel, or an AP closer to the
    printer. 0.699% is not a marginal link; it is a bad one.
-3. **Stay on WebRTC.** This does not reduce loss, but it changes what loss
-   looks like, which is most of the perceived problem. The browser's WebRTC
-   decoder knows when a frame is incomplete and discards it, so damage reads as
-   a brief hitch that clears at the next keyframe. MSE has no such check: the
-   damaged bitstream goes straight to the media element and is rendered, and
-   the smear persists for up to a keyframe interval. MSE also has to honour the
-   printer's RTP timestamps, which are junk, so it stutters as well.
+3. **Stay on WebRTC.** It does not reduce loss and it is not immune to it (see
+   below), but MSE on this camera is far worse: the same damaged bitstream
+   makes Chrome raise `MEDIA_ERR_DECODE` and stop, and MSE also has to honour
+   the printer's RTP timestamps, which are junk, so it stutters as well.
 
-Because of that last point the viewer now **names its transport**. If it falls
-back to MSE a notice says so, top left, with the reason -- almost always that
-8555 is not reachable and `WEBRTC_CANDIDATE` is unset. In the healthy WebRTC
-case nothing is shown.
+Because of that the viewer **names its transport**. If it falls back to MSE a
+notice says so, top left, with the reason -- almost always that 8555 is not
+reachable and `WEBRTC_CANDIDATE` is unset. In the healthy WebRTC case nothing
+is shown.
+
+### Why WebRTC is not immune either
+
+It would be reasonable to expect the browser to hide this: WebRTC normally
+detects an incomplete frame and discards it rather than rendering rubbish. That
+does not apply here, because **go2rtc launders the loss before the browser ever
+sees it.**
+
+In `pkg/h264/rtp.go`, `RTPDepay()` accumulates NAL units into an access unit
+until it sees a packet with the marker bit, and it never once looks at
+`packet.SequenceNumber`. So when a burst goes missing mid-frame, whatever
+arrived is assembled and emitted as though it were a whole frame. `RTPPay()`
+then re-packetizes for each consumer with `sequencer.NextSequenceNumber()` --
+a fresh, contiguous sequence.
+
+The consumer therefore receives an unbroken RTP stream that happens to contain
+structurally damaged frames. There is no gap to detect and nothing to NACK.
+What happens next is split:
+
+- frames damaged badly enough to be undecodable are rejected by the decoder --
+  the 128 above, which is what the freezes are;
+- frames damaged mildly enough to decode are decoded, and render as smeared or
+  stale blocks that propagate until the next keyframe.
+
+So WebRTC gets both the freezes *and* some smearing, from the same cause. This
+is most visible on a moving scene: a stale block during a travel move stands
+out, while the same block on an idle bed is invisible.
+
+The fix, if it is ever worth the cost, is upstream of the browser: track the
+incoming sequence number in the depacketizer, and on a gap discard the access
+unit under construction and keep discarding until the next IDR. That trades the
+smearing for a clean freeze of up to one keyframe interval. It is about twenty
+lines, but it means building go2rtc from a patched source instead of using the
+published image, so it is deliberately **not** done here -- fixing the
+printer's network removes the need for it entirely.
 
 And note that raising the frame rate, if it were possible, would make this
 *worse*: twice the packets across the same lossy channel, at half the bits per

@@ -268,8 +268,9 @@
 
 <div class="chrome" id="degraded" hidden>
   <b>MSE fallback</b>
-  <span>WebRTC could not be reached, so lost packets show as smearing and the
-  motion stutters. Publish UDP+TCP 8555 and set <code>WEBRTC_CANDIDATE</code>.</span>
+  <span>WebRTC could not be reached. On this transport a damaged frame stops
+  the decoder outright, and the motion stutters. Publish UDP+TCP 8555 and set
+  <code>WEBRTC_CANDIDATE</code>.</span>
 </div>
 
 <div class="chrome" id="print" hidden>
@@ -363,14 +364,20 @@ let graceTID = 0;
  * Which transport won matters more than it looks. The printer streams over its
  * own wifi and loses ~0.7% of RTP packets in bursts, and it advertises `nack`
  * without implementing it -- it never retransmits, so nothing downstream can
- * recover a lost packet. What differs is how the loss is *shown*:
+ * recover a lost packet.
  *
- *   WebRTC  the browser's decoder knows a frame is incomplete and drops it,
- *           so loss reads as a brief hitch and clears at the next keyframe.
- *   MSE     the damaged bitstream goes straight to the media element, which
- *           renders it -- smeared blocks that persist for up to a keyframe
- *           interval. The printer's RTP timestamps are junk too, and only MSE
- *           has to honour them, so it stutters as well.
+ * Neither transport hides that, and it is worth being precise about why: go2rtc
+ * assembles access units without checking RTP sequence continuity and then
+ * re-packetizes with fresh sequence numbers, so by the time either transport
+ * sees the stream the evidence of loss is gone. Damaged frames simply arrive
+ * looking whole. What differs is what the two do with them:
+ *
+ *   WebRTC  the decoder rejects frames it cannot decode (~7% here, which is
+ *           what the freezes are) and renders the milder ones, which smear
+ *           until the next keyframe. Degraded, but it keeps running.
+ *   MSE     Chrome raises MEDIA_ERR_DECODE and the decoder stops outright --
+ *           see onDecodeFault(). MSE also has to honour the printer's RTP
+ *           timestamps, which are junk, so it stutters as well.
  *
  * MSE is therefore a fault worth naming, not a quiet fallback.
  *
