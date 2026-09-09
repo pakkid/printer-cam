@@ -21,9 +21,8 @@ straight through to go2rtc, and adds one endpoint, `/print`, carrying four
 numbers for the progress overlay. go2rtc's HTTP port is not published at all
 any more, and Moonraker is never reachable from the browser.
 
-It publishes three ports: the viewer on `HTTP_PORT` (point your tunnel here),
-the on/off switch on `ADMIN_PORT`, and a bare WebRTC endpoint for Fluidd on
-`LAN_PORT` (do not tunnel either of the last two).
+It publishes two ports: the viewer on `HTTP_PORT` (point your tunnel here) and
+the on/off switch on `ADMIN_PORT` (do not).
 
 The viewer asks for WebRTC and MSE at the same time and keeps whichever
 connects, so a LAN browser gets real-time video and a browser coming through an
@@ -156,57 +155,6 @@ somebody is watching, switching off also stops the camera being read at all.
 | `ADMIN_BIND` | `0.0.0.0` | Set to one interface to narrow it further |
 | `ADMIN_ALLOW` | private ranges | Space-separated CIDRs |
 | `ADMIN_USER` / `ADMIN_PASS` | `admin` / *(empty)* | Optional password on the switch |
-
-## The LAN-only WebRTC endpoint
-
-A third port exists for one job: being the `stream_url` of a Fluidd webcam. It
-has no UI, and it is **not** gated by the camera switch, so Fluidd keeps working
-while the camera is off to the internet.
-
-```
-stream_url:   http://<docker-host>:1986/?src=printer
-snapshot_url: http://<docker-host>:1986/api/frame.jpeg?src=printer
-service:      webrtc-go2rtc
-```
-
-Only two paths answer on it -- `/api/ws` (which is all Fluidd's
-`webrtc-go2rtc` service uses) and `/api/frame.jpeg`. Everything else 404s: no
-viewer, no `/print`, no go2rtc API. `/` returns a line of plain text saying
-what the port is for, for whoever opens it expecting a picture.
-
-**Do not forward this port through your tunnel.** Its whole security model is
-that it is not on the internet, exactly like the switch port.
-
-### Why the switch no longer severs WebRTC
-
-It used to POST go2rtc's `/api/restart`, which tore down every peer connection.
-That had to go: go2rtc cannot tell which listener a peer arrived through, so
-restarting it also killed this LAN endpoint -- the one thing the switch must
-not touch.
-
-It costs nothing in practice. WebRTC media needs port 8555 reachable from the
-browser, and a tunnel forwarding only the public HTTP port gives a remote
-viewer no route to it, so remote viewers are on MSE, which the nginx reload
-does cut in about three seconds.
-
-The exception is forwarding TCP 8555 for remote WebRTC (`?mode=webrtc/tcp`).
-**Do not do that if you rely on the switch** -- such a session would survive it.
-
-### One thing left unverified
-
-The endpoint itself is proven: `curl` gets `101` on `/api/ws?src=printer`, a
-Fluidd-shaped `webrtc/offer` over that socket returns `webrtc/answer` plus ICE
-candidates, and a real WebRTC session on this port ran at 15.2 fps and was
-never interrupted by switching the public camera off.
-
-What could not be checked here is the browser step Fluidd actually performs:
-Fluidd is served from the printer, so its page opens a WebSocket to a
-*different* private address. Recent Chrome gates that behind Local Network
-Access, and the browser used for testing blocks it outright with no way to
-grant permission. In a normal browser you may get a local-network permission
-prompt that has to be allowed. If Fluidd's camera tile stays blank, check that
-first -- and try Firefox, which does not implement Local Network Access, to
-tell a permission problem apart from a configuration one.
 
 ## Print progress overlay
 
@@ -341,8 +289,6 @@ Set these under **Environment variables** (locally, copy `.env.example` to
 | `ADMIN_PORT` | `1985` | The on/off switch. Do not tunnel this port |
 | `ADMIN_ALLOW` | private ranges | Who may reach the switch |
 | `ADMIN_PASS` | *(empty)* | Optional password on the switch |
-| `LAN_PORT` | `1986` | Bare WebRTC endpoint for Fluidd. Do not tunnel this port |
-| `LAN_ALLOW` | private ranges | Who may reach it |
 
 Then open `http://<docker-host>:1984/`.
 
@@ -431,7 +377,6 @@ too.
 
 - Viewer: `http://host:1984/`
 - On/off switch: `http://host:1985/` (LAN only -- never tunnel it)
-- Fluidd WebRTC endpoint: `http://host:1986/?src=printer` (LAN only, no UI)
 - Snapshot / VLC / ffmpeg: `http://host:1984/api/stream.mp4?src=printer`
 - JPEG still: `http://host:1984/api/frame.jpeg?src=printer`
 

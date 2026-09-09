@@ -50,15 +50,6 @@ else
   : > /etc/nginx/admin-auth.conf
 fi
 
-# --- the always-on LAN port ------------------------------------------------
-LAN_ALLOW="${LAN_ALLOW:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1}"
-: > /etc/nginx/lan-allow.conf
-for cidr in $LAN_ALLOW; do
-  echo "allow $cidr;" >> /etc/nginx/lan-allow.conf
-done
-echo "deny all;" >> /etc/nginx/lan-allow.conf
-echo "printer-cam-web: always-on LAN viewer reachable from ${LAN_ALLOW}"
-
 # --- restore the switch position before nginx starts -----------------------
 mkdir -p "$STATE_DIR"
 if [ -f "$STATE_DIR/enabled" ] && [ "$(cat "$STATE_DIR/enabled")" = "0" ]; then
